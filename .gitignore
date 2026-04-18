@@ -5,5 +5,5 @@ env/
 .dat
 log/
 logs/
-data/
+./data/
 *egg-info/
