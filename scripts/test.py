@@ -5,46 +5,47 @@ from dataclasses import dataclass , field
 from typing import Optional
 import torch
 
-from tracklab.experiment import Experiment
+from tracklab import ExperimentTracker
 from icl import *
 
 
 @dataclass
 class ModelArgs:
-    vocab_size: int = 64  # Vocabulary size
-    seq_len: int = 256 # Sequence length
-    d_model: int = 128 # Model dimension
+    vocab_size: int = 32  # Vocabulary size
+    seq_len: int = 32 # Sequence length
+    d_model: int = 1024 # Model dimension
+    rank: int = 8 # rank or matrices
     dropout: float = 0.0 # Dropout rate
     lin_attn: bool = False # Whether to use linear attention or not
     # path: str = "full" # Path to follow (options are "full", "induction" and "bigram")
 
 @dataclass
 class DataArgs:
-    b_type: str = 'dirichlet' # P_b distribution type: dirichlet or spiked
+    b_type: str = 'spiked' # P_b distribution type: dirichlet or spiked
     alpha_d: float = 0.1 # Dirichlet concentration parameter for bigram distribution (only used if b_type is dirichlet or u_type is dirichlet)
     alpha_z: Optional[float] = 1.0 # Exponent for the Zipf distribution used to generate the unigram distribution P_u if b_type is 'spiked' and u_type is 'zipf'
-    u_type: Optional[str] = 'dirichlet' # P_u distribution type: dirichlet or zipf (only used if b_type is spiked)
+    u_type: Optional[str] = 'zipf' # P_u distribution type: dirichlet or zipf (only used if b_type is spiked)
     beta: Optional[float] = 0.8 # Beta parameter for spiked bigram distribution (only used if b_type is spiked)
     fix_trig: bool = True # Whether to fix the trigger tokens or not
     trig_type: Optional[str] = 'freq' # Type of fixed trigger tokens if fix_trig is True (options are 'freq', 'rare' and 'rand')
-    batch_size: int = 64 # Batch size for training
-    test_size: int = 100 # Number of samples in the test set
-    K : int = 15 # Number of trigger tokens
+    batch_size: int = 256 # Batch size for training
+    test_size: int = 512 # Number of samples in the test set
+    K : int = 6 # Number of trigger tokens  
 
 @dataclass
 class OptimArgs:
-    lr: float = 0.01
+    lr: float = 0.002
     opt: str = "adam"
     momentum: float = 0.9
     weight_decay: float = 0.0
 
 @dataclass 
 class ExtraArgs:
-    total_steps: int = 500 # Number of training steps
+    total_steps: int = 1000 # Number of training steps
     n_prints: int = 50 # Number of times to print during training.
     n_prints_model: int = 5 # Number of times to save model checkpoints during training.
     print_scale: str = 'linear' # Scale for printing steps: log or linear
-    experiment_name: str = 'tmp' # Name of the experiment for saving results
+    experiment_name: str = 'low_rank' # Name of the experiment for saving results
     file_name: str = 'results' # Name of the file for saving results
     path: str = "full" # Path to follow (options are "full", "induction" and "bigram")
 
@@ -67,11 +68,11 @@ def main():
     
     # Create an experiment and run
     experiment_name = cfg.extra_args.experiment_name
-    exp = Experiment(experiment_name)
+    exp = ExperimentTracker(experiment_name)
     run  = exp.start_run(cfg, artifacts=True)
 
     # Initialize logger for the run
-    logger = run.get_logger(log_to_file=True, log_to_terminal=False)
+    logger = run.get_logger(log_to_file=True, log_to_terminal=True)
 
     # Print the parameters
     logger.info("Experiment Configuration:")
@@ -102,7 +103,8 @@ def main():
     logger.info("\n".join(f"{key}: {value:.4f}" for key, value in dist_measures.items()))
 
     # Initialize Model
-    model = DualModel(cfg.model_args).to(device)
+    # model = DualModel(cfg.model_args).to(device)
+    model = LowRankTransformer(cfg.model_args).to(device)
     model = initialize_model(model,path=path)
 
     # Define triggers
