@@ -48,12 +48,13 @@ if __name__ == "__main__":
     loader = ExperimentLoader("low_rank")
     metrics = ['loss_total','top1_accuracy','kl_b_total','kl_b_bigram']
     fig , axes = plt.subplots(ncols=len(metrics))
+    print('init plot')
     for i, metric_name in enumerate(metrics):
         # metric_name = 'kl_b_bigram'
         ax = axes[i]
         ax.set_title(metric_name)
         df = get_metric_all_runs(loader,metric_name)
         plot_metric(df , ax)
-    
+    print('end plot')
     ax.legend()
     plt.show()

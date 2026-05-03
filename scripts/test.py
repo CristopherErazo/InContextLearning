@@ -24,8 +24,8 @@ class DataArgs:
     b_type: str = 'spiked' # P_b distribution type: dirichlet or spiked
     alpha_d: float = 0.1 # Dirichlet concentration parameter for bigram distribution (only used if b_type is dirichlet or u_type is dirichlet)
     alpha_z: Optional[float] = 1.0 # Exponent for the Zipf distribution used to generate the unigram distribution P_u if b_type is 'spiked' and u_type is 'zipf'
-    u_type: Optional[str] = 'zipf' # P_u distribution type: dirichlet or zipf (only used if b_type is spiked)
-    beta: Optional[float] = 0.8 # Beta parameter for spiked bigram distribution (only used if b_type is spiked)
+    u_type: Optional[str] = 'uniform' # P_u distribution type: dirichlet or zipf (only used if b_type is spiked)
+    beta: Optional[float] = 0.0 # Beta parameter for spiked bigram distribution (only used if b_type is spiked)
     fix_trig: bool = True # Whether to fix the trigger tokens or not
     trig_type: Optional[str] = 'freq' # Type of fixed trigger tokens if fix_trig is True (options are 'freq', 'rare' and 'rand')
     batch_size: int = 256 # Batch size for training
@@ -141,6 +141,12 @@ def main():
                                           trigger_set=trigger_set)
                                         #   device=device)
 
+    train_batch = generate_dual_task_batch(batch_size,
+                                          seq_len,
+                                          K,
+                                          distributions,
+                                          trigger_set=trigger_set)
+
 
 
     opt_losses = optimal_pop_losses(test_batch, P_b=distributions['P_b'])
@@ -202,10 +208,14 @@ def main():
     for step in range(total_steps):
         # Evaluations and logging of scalars
         if step in print_total_steps:
-            res = evaluator.evaluate(model, test_batch, loss_fn, distributions['P_b'], distributions['P_u'])
-            run.track_metric(step, **res)
+            res = evaluator.evaluate(model, train_batch, loss_fn, distributions['P_b'], distributions['P_u'])
+            run.track_metric(step, res, split="train")
             logger.info(f"{step}\t" + "\t".join(f"{v:.4f}" for v in res.values()))
 
+            
+            res = evaluator.evaluate(model, test_batch, loss_fn, distributions['P_b'], distributions['P_u'])
+            run.track_metric(step, res, split="test")
+            
         # Evaluations and logging of attention patterns
         if step in print_total_steps_model:
             att_patterns = get_attention_patterns(model, test_batch, path, device, n_test = 5)
@@ -214,14 +224,14 @@ def main():
                 run.track_artifact(step, v.cpu().numpy() if isinstance(v, torch.Tensor) else v, k)
             
         
-        batch = generate_dual_task_batch(batch_size,
-                                          seq_len,
-                                          K,
-                                          distributions,
-                                          trigger_set=trigger_set)
-                                        #   device=device)
+        # batch = generate_dual_task_batch(batch_size,
+        #                                   seq_len,
+        #                                   K,
+        #                                   distributions,
+        #                                   trigger_set=trigger_set)
+        #                                 #   device=device)
 
-        loss = evaluate_model(model,batch,loss_fn,path,device)
+        loss = evaluate_model(model,train_batch,loss_fn,path,device)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()

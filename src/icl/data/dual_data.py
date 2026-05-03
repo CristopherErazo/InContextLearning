@@ -63,6 +63,9 @@ def get_distributions(args, vocab_size:int, device:str='cpu') -> tuple[torch.Ten
             ranks = torch.arange(1, vocab_size + 1)
             P_u = 1.0 / ranks**args.alpha_z
             P_u /= P_u.sum() # Normalize to get a valid probability distribution
+        elif args.u_type == 'uniform':
+            print("Generating unigram distribution from a uniform distribution")
+            P_u = torch.ones(vocab_size) / vocab_size
         else:
             raise ValueError("Invalid u_type. Options are 'dirichlet' and 'zipf'.")
         
