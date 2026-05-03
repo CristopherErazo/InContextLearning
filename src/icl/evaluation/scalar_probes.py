@@ -34,6 +34,28 @@ class EvalContext:
             self.model_prob_bigram = torch.softmax(self.logits_bigram, dim=-1) # shape (B, L, V)
             self.std_logits = self.logits.std().item()
 
+        # Matrices of the model
+        
+        self.pos = model.embed.P.weight.data # shape (L, d)
+        self.E = model.embed.E.weight.data # shape (V, d)
+        
+        WQ = model.attn1.WQ.weight.data # shape (r, d)
+        WK = model.attn1.WK.weight.data # shape (r, d)
+        self.WQK1 = WQ.t() @ WK # shape (d, d)
+        WV = model.attn1.WV.weight.data # shape (r, d)
+        WO = model.attn1.WO.weight.data # shape (d, r)
+        self.WOV1 = WO @ WV # shape (d, d)
+        
+        WQ = model.attn2.WQ.weight.data # shape (r, d)
+        WK = model.attn2.WK.weight.data # shape (r, d)
+        self.WQK2 = WQ.t() @ WK # shape (d, d)
+        WV = model.attn2.WV.weight.data # shape (r, d)
+        WO = model.attn2.WO.weight.data # shape (d, r)
+        self.WOV2 = WO @ WV # shape (d, d)
+
+        self.M12 = self.WQK2 @ self.WOV1 # shape (d, d)
+
+        self.U = model.unembed.U.weight.data # shape (V, d)
 
 
 
@@ -113,6 +135,62 @@ class LogitStdMetric:
         
         return logits_masked.std().item()
 
+# Order Parameters 
+class M:
+    def __init__(self):
+        self.name = 'm'
+    def __call__(self, ctx):
+        # ── m : average p_s^T WQK1 p_{s-1} over adjacent pairs ─────────────────
+        WQK1 = ctx.WQK1 # shape (d, d)
+        P = ctx.pos # shape (L, d)
+        idx = torch.arange(1, ctx.seq_len, device=P.device) # shape (L-1,)
+        p_s   = P[idx]                     # (L-1, d)
+        p_sm1 = P[idx - 1]                 # (L-1, d)
+        # p_s^T A1 p_{s-1} for each pair, then average
+        m_vals = (p_s @ WQK1 * p_sm1).sum(dim=-1)         # (L-1,)
+        m = m_vals.mean()
+        return m.item()
+
+class Sigma1:
+    def __init__(self):
+        self.name = 'sigma1'
+    def __call__(self, ctx):
+        # ── sigma1 : ||WQK1||_F / sqrt(d) ───────────────────────────────────────
+        WQK1 = ctx.WQK1 # shape (d, d)
+        d = WQK1.size(0)
+        sigma1 = WQK1.norm(p='fro') / (d ** 0.5)
+        return sigma1.item()
+
+class Q:
+    def __init__(self):
+        self.name = 'q'
+    def __call__(self, ctx):
+        M = ctx.WQK2 @ ctx.WOV1                                  # (d, d)
+        # ── q = tr(M) / d ─────────────────────────────────────────────────────
+        q = M.trace() / M.size(0)
+        return q.item()
+
+class Eta:
+    def __init__(self):
+        self.name = 'eta'
+    def __call__(self, ctx):
+        # ── eta = ||M12||_F^2 / d ───────────────────────────────────────────────
+        M12 = ctx.M12 # shape (d, d)
+        d = M12.size(0)
+        eta = (M12.norm(p='fro') ** 2) / d
+        return eta.item()
+    
+class Gamma:
+    def __init__(self):
+        self.name = 'gamma'
+    def __call__(self, ctx):
+        # ── gamma = tr(U WOV2.T) / d ───────────────────────────────────────────────
+        UWV2T = ctx.U @ ctx.WOV2.T 
+        gamma = UWV2T.trace() / UWV2T.size(0)
+        return gamma.item()
+
+        
+
 class Evaluator:
     def __init__(self, metrics):
         self.metrics = metrics
@@ -128,3 +206,6 @@ class Evaluator:
 
         return results
     
+
+
+

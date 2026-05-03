@@ -177,7 +177,12 @@ def main():
         KLMetric(name="kl_b_bigram",
                 P_fn=lambda ctx: ctx.P_b[ctx.input],
                 Q_fn=lambda ctx: ctx.model_prob_bigram,
-                )                    
+                ),             
+        M(),
+        Gamma(),
+        Eta(),
+        Q(),
+        Sigma1()       
         ]
 
 

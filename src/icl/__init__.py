@@ -8,6 +8,11 @@ from icl.evaluation import (
     IC_TopKAccuracy,
     KLMetric,
     LossMetric,
+    M,
+    Gamma,
+    Eta,
+    Q,
+    Sigma1
 )
 from icl.models import (
     DualModel, 
