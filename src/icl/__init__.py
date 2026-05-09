@@ -12,7 +12,8 @@ from icl.evaluation import (
     Gamma,
     Eta,
     Q,
-    Sigma1
+    Sigma1,
+    loss_eff
 )
 from icl.models import (
     DualModel, 

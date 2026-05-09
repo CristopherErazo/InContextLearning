@@ -24,7 +24,8 @@ def evaluate_model(model,batch,loss_fn,path,device):
         logits_masked = logits[only_non_triggers] # shape (num_masked_positions, vocab_size)
         target_masked = target[only_non_triggers] # shape (num_masked_positions,)
     elif path == 'induction':
-        only_triggers = (input.unsqueeze(-1) == trigg_set.unsqueeze(1)).any(-1) & (counts >= 2) # shape (B, L)
+        # only_triggers = (input.unsqueeze(-1) == trigg_set.unsqueeze(1)).any(-1) & (counts >= 2) # shape (B, L)
+        only_triggers = torch.ones_like(input, dtype=torch.bool) # shape (B, L)
         logits_masked = logits[only_triggers] # shape (num_masked_positions, vocab_size)
         target_masked = target[only_triggers] # shape (num_masked_positions,)
     elif path == 'full_trigg':

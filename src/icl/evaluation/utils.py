@@ -68,3 +68,23 @@ def optimal_pop_losses(test_batch,P_b,p0=0.99):
         "pop_loss_bigram": pop_loss_3,
         "trigg_per_seq": trigg_per_seq
     }
+
+
+def get_sub_batch(test_batch, device, n_test = 5):
+    """ 
+    Get a sub-batch of the given batch of size n_test. 
+    """
+    sequence = test_batch['sequence'][:n_test].to(device) # shape (n_test, seq_len + 1)
+    trigger_set = test_batch['trigger_set'][:n_test].to(device) # shape (n_test, K)
+    output_set = test_batch['output_set'][:n_test].to(device) # shape (n_test, K)
+    counts = test_batch['counts'][:n_test].to(device) # shape (n_test, seq_len)
+    is_trigg = test_batch['is_trigg'][:n_test].to(device) # shape (n_test, seq_len)
+    mask = test_batch['mask'][:n_test].to(device) # shape (n_test, seq_len, seq_len)
+    return {
+        "sequence": sequence, # shape (n_test, seq_len + 1)
+        "trigger_set": trigger_set, # shape (n_test, K)
+        "output_set": output_set, # shape (n_test, K)
+        "counts": counts,    # shape (n_test, seq_len)
+        "is_trigg": is_trigg, # shape (n_test, seq_len)
+        "mask": mask # shape (n_test, seq_len, seq_len)
+    }

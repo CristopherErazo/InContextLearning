@@ -3,6 +3,7 @@ from .scalar_probes import M, Gamma, Eta, Q, Sigma1
 from .utils import compute_entropies_and_dkl, optimal_pop_losses
 from .training import evaluate_model
 from .tensor_probes import get_attention_patterns
+from .theory import loss_eff
 
 __all__ = [
     'Evaluator',
@@ -17,5 +18,6 @@ __all__ = [
     'Gamma',
     'Eta',
     'Q',
-    'Sigma1'
+    'Sigma1',
+    'loss_eff', 
 ]

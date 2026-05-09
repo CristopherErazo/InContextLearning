@@ -7,14 +7,15 @@ import torch
 
 from tracklab import ExperimentTracker
 from icl import *
+from icl.evaluation.utils import get_sub_batch
 
 
 @dataclass
 class ModelArgs:
     vocab_size: int = 32  # Vocabulary size
-    seq_len: int = 32 # Sequence length
+    seq_len: int = 64 # Sequence length
     d_model: int = 1024 # Model dimension
-    rank: int = 8 # rank or matrices
+    rank: int = 16 # rank or matrices
     dropout: float = 0.0 # Dropout rate
     lin_attn: bool = False # Whether to use linear attention or not
     # path: str = "full" # Path to follow (options are "full", "induction" and "bigram")
@@ -25,29 +26,29 @@ class DataArgs:
     alpha_d: float = 0.1 # Dirichlet concentration parameter for bigram distribution (only used if b_type is dirichlet or u_type is dirichlet)
     alpha_z: Optional[float] = 1.0 # Exponent for the Zipf distribution used to generate the unigram distribution P_u if b_type is 'spiked' and u_type is 'zipf'
     u_type: Optional[str] = 'uniform' # P_u distribution type: dirichlet or zipf (only used if b_type is spiked)
-    beta: Optional[float] = 0.0 # Beta parameter for spiked bigram distribution (only used if b_type is spiked)
+    beta: Optional[float] = 0. # Beta parameter for spiked bigram distribution (only used if b_type is spiked)
     fix_trig: bool = True # Whether to fix the trigger tokens or not
     trig_type: Optional[str] = 'freq' # Type of fixed trigger tokens if fix_trig is True (options are 'freq', 'rare' and 'rand')
-    batch_size: int = 256 # Batch size for training
-    test_size: int = 512 # Number of samples in the test set
-    K : int = 6 # Number of trigger tokens  
+    batch_size: int = 64 # Batch size for training
+    test_size: int = 200 # Number of samples in the test set
+    K : int = 10 # Number of trigger tokens  
 
 @dataclass
 class OptimArgs:
-    lr: float = 0.002
+    lr: float = 0.0005
     opt: str = "adam"
     momentum: float = 0.9
     weight_decay: float = 0.0
 
 @dataclass 
 class ExtraArgs:
-    total_steps: int = 1000 # Number of training steps
-    n_prints: int = 50 # Number of times to print during training.
+    total_steps: int = 3000 # Number of training steps
+    n_prints: int = 100 # Number of times to print during training.
     n_prints_model: int = 5 # Number of times to save model checkpoints during training.
     print_scale: str = 'linear' # Scale for printing steps: log or linear
-    experiment_name: str = 'low_rank' # Name of the experiment for saving results
+    experiment_name: str = 'tmp_theory' # Name of the experiment for saving results
     file_name: str = 'results' # Name of the file for saving results
-    path: str = "full" # Path to follow (options are "full", "induction" and "bigram")
+    path: str = "induction" # Path to follow (options are "full", "induction" and "bigram")
 
 @dataclass
 class TrainerArgs:
@@ -140,12 +141,9 @@ def main():
                                           distributions,
                                           trigger_set=trigger_set)
                                         #   device=device)
+    sub_batch = get_sub_batch(test_batch,device = device, n_test=10)
 
-    train_batch = generate_dual_task_batch(batch_size,
-                                          seq_len,
-                                          K,
-                                          distributions,
-                                          trigger_set=trigger_set)
+
 
 
 
@@ -158,26 +156,26 @@ def main():
     metrics = [
         IC_TopKAccuracy(1),
         IC_TopKAccuracy(3),
-        LossMetric(name = "loss_total",
-                   logits_fn = lambda ctx: ctx.logits[ctx.all],
+        LossMetric(name = "loss",
+                   logits_fn = lambda ctx: ctx.logits_induction[ctx.all],
                    target_fn = lambda ctx: ctx.target[ctx.all],
                    rescale = True),
-        LossMetric(name = "loss_bigram",
-                   logits_fn = lambda ctx: ctx.logits_bigram[ctx.only_non_triggers],
-                   target_fn = lambda ctx: ctx.target[ctx.only_non_triggers], 
-                   rescale = False),
-        LossMetric(name = "loss_ind",
-                   logits_fn = lambda ctx: ctx.logits_induction[ctx.only_triggers],
-                   target_fn = lambda ctx: ctx.target[ctx.only_triggers], 
-                   rescale = False),    
-        KLMetric(name="kl_b_total",
-                P_fn=lambda ctx: ctx.P_b[ctx.input],
-                Q_fn=lambda ctx: ctx.model_prob,
-                ),
-        KLMetric(name="kl_b_bigram",
-                P_fn=lambda ctx: ctx.P_b[ctx.input],
-                Q_fn=lambda ctx: ctx.model_prob_bigram,
-                ),             
+        # LossMetric(name = "loss_bigram",
+        #            logits_fn = lambda ctx: ctx.logits_bigram[ctx.only_non_triggers],
+        #            target_fn = lambda ctx: ctx.target[ctx.only_non_triggers], 
+        #            rescale = False),
+        # LossMetric(name = "loss_ind",
+        #            logits_fn = lambda ctx: ctx.logits_induction[ctx.only_triggers],
+        #            target_fn = lambda ctx: ctx.target[ctx.only_triggers], 
+        #            rescale = False),    
+        # KLMetric(name="kl_b_total",
+        #         P_fn=lambda ctx: ctx.P_b[ctx.input],
+        #         Q_fn=lambda ctx: ctx.model_prob,
+        #         ),
+        # KLMetric(name="kl_b_bigram",
+        #         P_fn=lambda ctx: ctx.P_b[ctx.input],
+        #         Q_fn=lambda ctx: ctx.model_prob_bigram,
+        #         ),             
         M(),
         Gamma(),
         Eta(),
@@ -205,7 +203,7 @@ def main():
         print_total_steps = np.linspace(0, total_steps-1, num=nprints).astype(int)
         print_total_steps_model = np.linspace(0, total_steps-1, num=nprints_model).astype(int)
 
-    logger.info(f"Step/{total_steps}\t" + "\t".join(m.name for m in metrics))
+    logger.info(f"Step/{total_steps}\t" + "\t".join(m.name for m in metrics) + "\t loss_eff")
     
     t0 = time.time()
 
@@ -213,33 +211,47 @@ def main():
     for step in range(total_steps):
         # Evaluations and logging of scalars
         if step in print_total_steps:
-            res = evaluator.evaluate(model, train_batch, loss_fn, distributions['P_b'], distributions['P_u'])
-            run.track_metric(step, res, split="train")
+            res = evaluator.evaluate(model, test_batch, loss_fn, distributions['P_b'], distributions['P_u'])
+            L_eff = loss_eff(res['m'],
+                             res['sigma1'],
+                             res['q'],
+                             res['eta'],
+                             res['gamma'],
+                             d=cfg.model_args.d_model,
+                             L=cfg.model_args.seq_len,
+                             V=cfg.model_args.vocab_size,
+                             K=cfg.data_args.K,
+                             )
+            res['loss_eff'] = L_eff.item()
+
+            run.track_metric(step, **res)
             logger.info(f"{step}\t" + "\t".join(f"{v:.4f}" for v in res.values()))
 
             
-            res = evaluator.evaluate(model, test_batch, loss_fn, distributions['P_b'], distributions['P_u'])
-            run.track_metric(step, res, split="test")
+            # res = evaluator.evaluate(model, test_batch, loss_fn, distributions['P_b'], distributions['P_u'])
+            # run.track_metric(step, res, split="test")
             
         # Evaluations and logging of attention patterns
         if step in print_total_steps_model:
-            att_patterns = get_attention_patterns(model, test_batch, path, device, n_test = 5)
+            att_patterns = get_attention_patterns(model, sub_batch , path, device)
             logger.info(f'Saving attention patterns at step {step} with shapes: ' + ", ".join(f"{k}: {v.shape}" for k, v in att_patterns.items()))
             for k, v in att_patterns.items():
-                run.track_artifact(step, v.cpu().numpy() if isinstance(v, torch.Tensor) else v, k)
+                run.track_artifact(v.cpu().numpy() if isinstance(v, torch.Tensor) else v, step, k)
             
         
-        # batch = generate_dual_task_batch(batch_size,
-        #                                   seq_len,
-        #                                   K,
-        #                                   distributions,
-        #                                   trigger_set=trigger_set)
-        #                                 #   device=device)
+        batch = generate_dual_task_batch(batch_size,
+                                          seq_len,
+                                          K,
+                                          distributions,
+                                          trigger_set=trigger_set)
+                                        #   device=device)
 
-        loss = evaluate_model(model,train_batch,loss_fn,path,device)
+        loss = evaluate_model(model,batch,loss_fn,path,device)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+    # Save sub_batch for final evaluation
+    run.track_artifact(sub_batch,name='sub_batch',type='pickle')
 
     t1 = time.time()
     run.finalize()

@@ -16,10 +16,12 @@ class EvalContext:
         self.counts = batch['counts'].to(device) # shape (B, L)
         self.mask = batch['mask'].to(device) # shape (B, L, L)
         self.trigger_set = batch['trigger_set'].to(device) # shape (B, K)
+        self.trigger_set_unique = self.trigger_set[0] # shape (K,)
         self.only_triggers = (self.input.unsqueeze(-1) == self.trigger_set.unsqueeze(1)).any(-1) & (self.counts >= 2) # shape (B, L)
         self.only_non_triggers = ~( (self.input.unsqueeze(-1) == self.trigger_set.unsqueeze(1)).any(-1) ) # shape (B, L)
         self.all = torch.ones_like(self.input, dtype=torch.bool) # shape (B, L)
-        
+        self.seq_len = self.input.size(1)
+
         self.model = model
         self.loss_fn = loss_fn
         self.P_b = P_b.to(device) # shape (V, V)
@@ -53,7 +55,7 @@ class EvalContext:
         WO = model.attn2.WO.weight.data # shape (d, r)
         self.WOV2 = WO @ WV # shape (d, d)
 
-        self.M12 = self.WQK2 @ self.WOV1 # shape (d, d)
+        self.M = self.WQK2 @ self.WOV1 # shape (d, d)
 
         self.U = model.unembed.U.weight.data # shape (V, d)
 
@@ -147,7 +149,7 @@ class M:
         p_s   = P[idx]                     # (L-1, d)
         p_sm1 = P[idx - 1]                 # (L-1, d)
         # p_s^T A1 p_{s-1} for each pair, then average
-        m_vals = (p_s @ WQK1 * p_sm1).sum(dim=-1)         # (L-1,)
+        m_vals = (p_s @ WQK1 * p_sm1).sum(dim=-1) # shape (L-1,)
         m = m_vals.mean()
         return m.item()
 
@@ -165,28 +167,37 @@ class Q:
     def __init__(self):
         self.name = 'q'
     def __call__(self, ctx):
-        M = ctx.WQK2 @ ctx.WOV1                                  # (d, d)
-        # ── q = tr(M) / d ─────────────────────────────────────────────────────
-        q = M.trace() / M.size(0)
+        # ── q : average e_t^T M e_t over t in trigger_set_unique ─────────────────
+        M = ctx.M                                # (d, d)
+        idx = ctx.trigger_set_unique # shape (K,)
+        e_t = ctx.E[idx]           # shape (K, d)
+        q_vals = (e_t @ M * e_t).sum(dim=-1) # shape (K,)
+        q = q_vals.mean()
         return q.item()
+        # # ── q = tr(M) / d ─────────────────────────────────────────────────────
+        # q = M.trace() / M.size(0)
+        # return q.item()
 
 class Eta:
     def __init__(self):
         self.name = 'eta'
     def __call__(self, ctx):
-        # ── eta = ||M12||_F^2 / d ───────────────────────────────────────────────
-        M12 = ctx.M12 # shape (d, d)
-        d = M12.size(0)
-        eta = (M12.norm(p='fro') ** 2) / d
+        # ── eta = ||M||_F / sqrt(d) ───────────────────────────────────────────────
+        M = ctx.M # shape (d, d)
+        d = M.size(0)
+        eta = M.norm(p='fro') / (d ** 0.5)
         return eta.item()
     
 class Gamma:
     def __init__(self):
         self.name = 'gamma'
     def __call__(self, ctx):
-        # ── gamma = tr(U WOV2.T) / d ───────────────────────────────────────────────
-        UWV2T = ctx.U @ ctx.WOV2.T 
-        gamma = UWV2T.trace() / UWV2T.size(0)
+        # ── gamma : average u_t^T WOV2 e_t over t in vocabulary ─────────────────
+        WOV2 = ctx.WOV2 
+        U = ctx.U # shape (V, d)
+        E = ctx.E # shape (V, d)
+        gamma_vals = (U @ WOV2 * E).sum(dim=-1) # shape (V,)
+        gamma = gamma_vals.mean()
         return gamma.item()
 
         
@@ -206,6 +217,5 @@ class Evaluator:
 
         return results
     
-
 
 
