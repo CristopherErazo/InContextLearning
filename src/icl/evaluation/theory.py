@@ -54,7 +54,7 @@ def P_prev(m: Tensor, sigma1: Tensor, d: int, L: int) -> Tensor:
     Returns:
         Tensor of same shape as m / sigma1.
     """
-    snr = m * (d ** 0.5) / sigma1.clamp(min=1e-8)
+    snr = m * (d) / sigma1.clamp(min=1e-8)
     log_p = (L - 1) * torch.log(_phi(snr).clamp(min=1e-40))
     return torch.exp(log_p)
 
@@ -74,7 +74,7 @@ def P_ind(q: Tensor, eta: Tensor, d: int, L: int) -> Tensor:
     Returns:
         Tensor of same shape as q / eta.
     """
-    snr = q * (d ** 0.5) / eta.clamp(min=1e-8)
+    snr = q * (d) / eta.clamp(min=1e-8)
     log_p = (L - 1) * torch.log(_phi(snr).clamp(min=1e-40))
     return torch.exp(log_p)
 
@@ -218,14 +218,13 @@ def loss_eff(
     snr2 = q * (d / eta.clamp(min=1e-8)) ** 0.5
 
     return {
-        "L_eff":           L_eff,
-        "log_V":           log_V.expand_as(L_eff),
+        "loss_eff":           L_eff,
         "P_prev":          pp,
         "P_ind":           pi_ind,
         "delta_L":         dL,
         "SNR_layer1":      snr1,
         "SNR_layer2":      snr2,
-        "pi":              torch.tensor(pi_val).expand_as(L_eff),
+        "pi":              torch.tensor(pi_val),
         "gain_term":       eps * pi_val * pp * pi_ind * dL,
     }
 

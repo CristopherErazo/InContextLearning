@@ -8,10 +8,11 @@ class EmbeddingModule(nn.Module):
         super().__init__()
         self.E = nn.Embedding(vocab_size, d_model)
         self.P = nn.Embedding(seq_len, d_model)
+        self.d_model = d_model
     
     def forward(self, x):
         positions = torch.arange(x.size(1), device=x.device)
-        return self.E(x) + self.P(positions)
+        return (self.E(x) + self.P(positions))
 
 class AttentionLayer(nn.Module):
     def __init__(self, d_model, rank, dropout=0.0, lin_attn=False):
@@ -22,6 +23,7 @@ class AttentionLayer(nn.Module):
         self.WO = nn.Linear(rank, d_model, bias=False)
         self.dropout = nn.Dropout(dropout)
         self.lin_attn = lin_attn
+        self.rank = rank
 
     def forward(self, X, mask):
         """X.shape = (B,L,d)"""
@@ -33,7 +35,7 @@ class AttentionLayer(nn.Module):
         if self.lin_attn:
             A = S.masked_fill(~mask, 0.0)/math.sqrt(X.size(-1))
         else:
-            S = S*math.sqrt(X.size(-1))
+            S = S/math.sqrt(self.rank)
             S = S.masked_fill(~mask, float('-inf'))
             A = S.softmax(dim=-1)
 
@@ -118,17 +120,17 @@ class LowRankTransformer(nn.Module):
             out['X3'] = X3
         out['logits'] = self.unembed(X3)
         return out
-    
-   
-def initialize_model(model,path="full"):
-    """ 
-    Initialize model as ~ N(0, 1/sqrt(d_model)) and freeze: 
-    [ embedding, positional embedding, unembedding, VO projection of first attention]
-    """
 
-    # Initialize and freeze them all at first
-    for param in model.parameters():
-        param.data.copy_(torch.randn_like(param) / math.sqrt(model.d_model))
+
+def initialize_model(model,path="full"):
+    # Initialize E,P,U ~ N(0,1), WO ~N(0,1/sqrt(r) and the rest ~ N(0,1/sqrt(d_model))
+    for name, param in model.named_parameters():
+        if "embed" in name or "unembed" in name:
+            param.data.copy_(torch.randn_like(param))
+        elif "WO" in name:
+            param.data.copy_(torch.randn_like(param) / math.sqrt(model.rank))
+        else:
+            param.data.copy_(torch.randn_like(param) / math.sqrt(model.d_model))
         param.requires_grad = False
 
     # Unfreeze depending on the path
@@ -164,3 +166,49 @@ def initialize_model(model,path="full"):
         raise ValueError("Invalid path. Options are 'full', 'induction', and 'bigram'.")
     
     return model
+    
+   
+# def initialize_model(model,path="full"):
+#     """ 
+#     Initialize model as ~ N(0, 1/sqrt(d_model)) and freeze: 
+#     [ embedding, positional embedding, unembedding, VO projection of first attention]
+#     """
+
+#     # Initialize and freeze them all at first
+#     for param in model.parameters():
+#         param.data.copy_(torch.randn_like(param) / math.sqrt(model.d_model))
+#         param.requires_grad = False
+
+#     # Unfreeze depending on the path
+#     if path == "full":
+#         model.attn1.WQ.weight.requires_grad = True
+#         model.attn1.WK.weight.requires_grad = True
+#         model.attn2.WQ.weight.requires_grad = True
+#         model.attn2.WK.weight.requires_grad = True
+#         model.attn2.WV.weight.requires_grad = True
+#         model.attn2.WO.weight.requires_grad = True
+#         model.ff.WF_down.weight.requires_grad = True
+#         model.ff.WF_up.weight.requires_grad = True
+#     elif path == "induction":
+#         model.attn1.WQ.weight.requires_grad = True
+#         model.attn1.WK.weight.requires_grad = True
+#         model.attn2.WQ.weight.requires_grad = True
+#         model.attn2.WK.weight.requires_grad = True
+#         model.attn2.WV.weight.requires_grad = True
+#         model.attn2.WO.weight.requires_grad = True
+#     elif path == "bigram":
+#         model.ff.WF_down.weight.requires_grad = True
+#         model.ff.WF_up.weight.requires_grad = True
+#     elif path == "full_trigg":
+#         model.attn1.WQ.weight.requires_grad = True
+#         model.attn1.WK.weight.requires_grad = True
+#         model.attn2.WQ.weight.requires_grad = True
+#         model.attn2.WK.weight.requires_grad = True
+#         model.attn2.WV.weight.requires_grad = True
+#         model.attn2.WO.weight.requires_grad = True
+#         model.ff.WF_down.weight.requires_grad = True
+#         model.ff.WF_up.weight.requires_grad = True
+#     else:
+#         raise ValueError("Invalid path. Options are 'full', 'induction', and 'bigram'.")
+    
+#     return model

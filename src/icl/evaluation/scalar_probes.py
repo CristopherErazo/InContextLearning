@@ -150,8 +150,8 @@ class M:
         p_sm1 = P[idx - 1]                 # (L-1, d)
         # p_s^T A1 p_{s-1} for each pair, then average
         m_vals = (p_s @ WQK1 * p_sm1).sum(dim=-1) # shape (L-1,)
-        m = m_vals.mean()
-        return m.item()
+        m = m_vals.sum()
+        return m.item() / WQK1.size(0)**2 
 
 class Sigma1:
     def __init__(self):
@@ -160,7 +160,7 @@ class Sigma1:
         # ── sigma1 : ||WQK1||_F / sqrt(d) ───────────────────────────────────────
         WQK1 = ctx.WQK1 # shape (d, d)
         d = WQK1.size(0)
-        sigma1 = WQK1.norm(p='fro') / (d ** 0.5)
+        sigma1 = WQK1.norm(p='fro') / d
         return sigma1.item()
 
 class Q:
@@ -169,11 +169,13 @@ class Q:
     def __call__(self, ctx):
         # ── q : average e_t^T M e_t over t in trigger_set_unique ─────────────────
         M = ctx.M                                # (d, d)
+        WOV1 = ctx.WOV1                          # (d, d)
+        normWOV1 = WOV1.norm(p='fro') 
         idx = ctx.trigger_set_unique # shape (K,)
         e_t = ctx.E[idx]           # shape (K, d)
         q_vals = (e_t @ M * e_t).sum(dim=-1) # shape (K,)
-        q = q_vals.mean()
-        return q.item()
+        q = q_vals.sum()
+        return q.item()/(normWOV1 * M.size(0))
         # # ── q = tr(M) / d ─────────────────────────────────────────────────────
         # q = M.trace() / M.size(0)
         # return q.item()
@@ -183,9 +185,11 @@ class Eta:
         self.name = 'eta'
     def __call__(self, ctx):
         # ── eta = ||M||_F / sqrt(d) ───────────────────────────────────────────────
-        M = ctx.M # shape (d, d)
-        d = M.size(0)
-        eta = M.norm(p='fro') / (d ** 0.5)
+        WQK2 = ctx.WQK2 # shape (d, d)
+        WOV1 = ctx.WOV1                          # (d, d)
+        normWOV1 = WOV1.norm(p='fro') 
+        d = WQK2.size(0)
+        eta = WQK2.norm(p='fro') / normWOV1
         return eta.item()
     
 class Gamma:
@@ -197,8 +201,8 @@ class Gamma:
         U = ctx.U # shape (V, d)
         E = ctx.E # shape (V, d)
         gamma_vals = (U @ WOV2 * E).sum(dim=-1) # shape (V,)
-        gamma = gamma_vals.mean()
-        return gamma.item()
+        gamma = gamma_vals.sum()
+        return gamma.item()/U.size(1) # normalize by d
 
         
 

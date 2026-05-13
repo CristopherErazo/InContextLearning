@@ -13,8 +13,8 @@ from icl.evaluation.utils import get_sub_batch
 @dataclass
 class ModelArgs:
     vocab_size: int = 32  # Vocabulary size
-    seq_len: int = 64 # Sequence length
-    d_model: int = 1024 # Model dimension
+    seq_len: int = 128 # Sequence length
+    d_model: int = 2048 # Model dimension
     rank: int = 16 # rank or matrices
     dropout: float = 0.0 # Dropout rate
     lin_attn: bool = False # Whether to use linear attention or not
@@ -35,14 +35,14 @@ class DataArgs:
 
 @dataclass
 class OptimArgs:
-    lr: float = 0.0005
+    lr: float = 0.0003
     opt: str = "adam"
     momentum: float = 0.9
     weight_decay: float = 0.0
 
 @dataclass 
 class ExtraArgs:
-    total_steps: int = 3000 # Number of training steps
+    total_steps: int = 2000 # Number of training steps
     n_prints: int = 100 # Number of times to print during training.
     n_prints_model: int = 5 # Number of times to save model checkpoints during training.
     print_scale: str = 'linear' # Scale for printing steps: log or linear
@@ -212,7 +212,7 @@ def main():
         # Evaluations and logging of scalars
         if step in print_total_steps:
             res = evaluator.evaluate(model, test_batch, loss_fn, distributions['P_b'], distributions['P_u'])
-            L_eff = loss_eff(res['m'],
+            theory = loss_eff(res['m'],
                              res['sigma1'],
                              res['q'],
                              res['eta'],
@@ -221,8 +221,11 @@ def main():
                              L=cfg.model_args.seq_len,
                              V=cfg.model_args.vocab_size,
                              K=cfg.data_args.K,
+                             return_components=True
                              )
-            res['loss_eff'] = L_eff.item()
+            theory = {k: v.item() for k, v in theory.items()}
+            res = {**res, **theory}
+            # res['loss_eff'] = L_eff.item()
 
             run.track_metric(step, **res)
             logger.info(f"{step}\t" + "\t".join(f"{v:.4f}" for v in res.values()))
