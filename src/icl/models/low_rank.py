@@ -31,18 +31,16 @@ class AttentionLayer(nn.Module):
         k = self.WK(X) #(B,L,r)
         v = self.WV(X) #(B,L,r)
         # (B,L,r) @ (B,r,L) --> (B,L,L)
-        S = q @ k.transpose(-2, -1)
+        S = q @ k.transpose(-2, -1)/math.sqrt(self.rank)
         if self.lin_attn:
-            A = S.masked_fill(~mask, 0.0)/math.sqrt(X.size(-1))
+            A = S.masked_fill(~mask, 0.0)
         else:
-            S = S/math.sqrt(self.rank)
-            S = S.masked_fill(~mask, float('-inf'))
-            A = S.softmax(dim=-1)
+            A = (S.masked_fill(~mask, float('-inf'))).softmax(dim=-1)
 
         A = self.dropout(A)
         Y = A @ v #(B,L,r) 
         Y = self.WO(Y) #(B,L,d)
-        return X + Y, A
+        return X + Y, A, S
     
 
 class FeedForwardLayer(nn.Module):
@@ -87,8 +85,8 @@ class LowRankTransformer(nn.Module):
         X0 = self.embed(x)
 
         if path in ["induction", "full"]:
-            X1, _ = self.attn1(X0, mask)
-            X2, _ = self.attn2(X1, mask)
+            X1, _, _ = self.attn1(X0, mask)
+            X2, _, _ = self.attn2(X1, mask)
         else:
             X2 = X0
 
@@ -105,10 +103,10 @@ class LowRankTransformer(nn.Module):
         X0 = self.embed(x)
         out['X0'] = X0
         if path in ["induction", "full"]:
-            X1, A1 = self.attn1(X0, mask)
-            out['X1'], out['A1'] = X1, A1
-            X2, A2 = self.attn2(X1, mask)
-            out['X2'], out['A2'] = X2, A2
+            X1, A1, S1 = self.attn1(X0, mask)
+            out['X1'], out['A1'], out['S1'] = X1, A1, S1
+            X2, A2, S2 = self.attn2(X1, mask)
+            out['X2'], out['A2'], out['S2'] = X2, A2, S2
         else:
             X2 = X0
             out['X2'] = X2
@@ -122,15 +120,15 @@ class LowRankTransformer(nn.Module):
         return out
 
 
-def initialize_model(model,path="full"):
+def initialize_model(model,path="full",sigma_0=0.5):
     # Initialize E,P,U ~ N(0,1), WO ~N(0,1/sqrt(r) and the rest ~ N(0,1/sqrt(d_model))
     for name, param in model.named_parameters():
-        if "embed" in name or "unembed" in name:
-            param.data.copy_(torch.randn_like(param))
+        if "embed.E" in name or "embed.P" in name:
+            param.data.copy_(sigma_0*torch.randn_like(param))
         elif "WO" in name:
-            param.data.copy_(torch.randn_like(param) / math.sqrt(model.rank))
+            param.data.copy_(sigma_0*torch.randn_like(param) / math.sqrt(model.rank))
         else:
-            param.data.copy_(torch.randn_like(param) / math.sqrt(model.d_model))
+            param.data.copy_(sigma_0*torch.randn_like(param) / math.sqrt(model.d_model))
         param.requires_grad = False
 
     # Unfreeze depending on the path

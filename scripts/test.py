@@ -13,9 +13,9 @@ from icl.evaluation.utils import get_sub_batch
 @dataclass
 class ModelArgs:
     vocab_size: int = 32  # Vocabulary size
-    seq_len: int = 128 # Sequence length
-    d_model: int = 2048 # Model dimension
-    rank: int = 16 # rank or matrices
+    seq_len: int = 16 # Sequence length
+    d_model: int = 1024 # Model dimension
+    rank: int = 8 # rank or matrices
     dropout: float = 0.0 # Dropout rate
     lin_attn: bool = False # Whether to use linear attention or not
     # path: str = "full" # Path to follow (options are "full", "induction" and "bigram")
@@ -35,14 +35,14 @@ class DataArgs:
 
 @dataclass
 class OptimArgs:
-    lr: float = 0.0003
+    lr: float = 0.0001
     opt: str = "adam"
     momentum: float = 0.9
     weight_decay: float = 0.0
 
 @dataclass 
 class ExtraArgs:
-    total_steps: int = 2000 # Number of training steps
+    total_steps: int = 5000 # Number of training steps
     n_prints: int = 100 # Number of times to print during training.
     n_prints_model: int = 5 # Number of times to save model checkpoints during training.
     print_scale: str = 'linear' # Scale for printing steps: log or linear
