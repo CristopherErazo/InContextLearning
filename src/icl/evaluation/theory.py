@@ -18,7 +18,7 @@ Order parameters:
 All order parameters can be passed as scalars or as batched tensors of shape (T,)
 for vectorised evaluation over a trajectory of T checkpoints.
 """
-
+import math
 import torch
 from torch import Tensor
 from typing import Union
@@ -35,49 +35,12 @@ def _phi(x: Tensor) -> Tensor:
     """Standard normal CDF Phi(x), numerically stable for large |x|."""
     return 0.5 * (1.0 + torch.erf(x / (2.0 ** 0.5)))
 
-
-def P_prev(m: Tensor, sigma1: Tensor, d: int, L: int) -> Tensor:
-    """
-    Probability that layer-1 (previous-token head) attends correctly at all
-    positions.
-
-        P_prev = Phi(m * sqrt(d) / sigma1)^(L-1)
-
-    Computed in log-space to avoid underflow for large L.
-
-    Args:
-        m      : layer-1 signal order parameter
-        sigma1 : layer-1 noise order parameter  (must be > 0)
-        d      : embedding dimension
-        L      : sequence length
-
-    Returns:
-        Tensor of same shape as m / sigma1.
-    """
-    snr = m * (d) / sigma1.clamp(min=1e-8)
-    log_p = (L - 1) * torch.log(_phi(snr).clamp(min=1e-40))
-    return torch.exp(log_p)
-
-
-def P_ind(q: Tensor, eta: Tensor, d: int, L: int) -> Tensor:
-    """
-    Probability that layer-2 (induction head) attends to the correct key.
-
-        P_ind = Phi(q * sqrt(d / eta))^(L-1)
-
-    Args:
-        q   : layer-2 signal order parameter
-        eta : layer-2 noise order parameter  (must be > 0)
-        d   : embedding dimension
-        L   : sequence length
-
-    Returns:
-        Tensor of same shape as q / eta.
-    """
-    snr = q * (d) / eta.clamp(min=1e-8)
-    log_p = (L - 1) * torch.log(_phi(snr).clamp(min=1e-40))
-    return torch.exp(log_p)
-
+def success_prob(snr: Tensor, L: int) -> Tensor:
+    """Probability of correct attention over L-1 positions given SNR."""
+    p = _phi(snr).clamp(min=1e-40,max=1-1e-5) # avoid underflow
+    # log_P = -math.log(L-1) + torch.log1p(-p.pow(L-1)) - torch.log1p(-p) # log(1 - p^(L-1)) - log(1-p) - log(L-1)
+    log_P = (L-1) * torch.log(p) # log(p^(L-1)) = (L-1)*log(p)
+    return log_P.exp()
 
 def delta_L(gamma: Tensor, V: int) -> Tensor:
     """
@@ -141,10 +104,10 @@ def pi_theory(L: int, V: int) -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def loss_eff(
-    m:      FloatLike,
-    sigma1: FloatLike,
-    q:      FloatLike,
-    eta:    FloatLike,
+    m1:      FloatLike,
+    eta1: FloatLike,
+    m2:      FloatLike,
+    eta2:    FloatLike,
     gamma:  FloatLike,
     *,
     d: int,
@@ -161,10 +124,10 @@ def loss_eff(
               - (K/V) * pi * P_prev(m, sigma1) * P_ind(q, eta) * DeltaL(gamma)
 
     Args:
-        m      : layer-1 positional attention signal  [scalar or (T,)]
-        sigma1 : layer-1 noise level                  [scalar or (T,)]
-        q      : layer-2 induction signal             [scalar or (T,)]
-        eta    : layer-2 noise variance               [scalar or (T,)]
+        m1      : layer-1 positional attention signal  [scalar or (T,)]
+        eta1    : layer-1 noise level (std)            [scalar or (T,)]
+        m2     : layer-2 induction signal             [scalar or (T,)]
+        eta2    : layer-2 noise variance               [scalar or (T,)]
         gamma  : readout alignment                    [scalar or (T,)]
 
         d      : embedding dimension                  (int, keyword-only)
@@ -186,45 +149,46 @@ def loss_eff(
             return x.float()
         return torch.tensor(float(x))
 
-    m      = _t(m)
-    sigma1 = _t(sigma1)
-    q      = _t(q)
-    eta    = _t(eta)
+    m1      = _t(m1)
+    eta1    = _t(eta1)
+    m2      = _t(m2)
+    eta2    = _t(eta2)
     gamma  = _t(gamma)
 
     # broadcast to common shape
-    m, sigma1, q, eta, gamma = torch.broadcast_tensors(m, sigma1, q, eta, gamma)
+    m1, eta1, m2, eta2, gamma = torch.broadcast_tensors(m1, eta1, m2, eta2, gamma)
 
     # ── task constants ─────────────────────────────────────────────────────
     log_V  = torch.log(torch.tensor(float(V)))
     eps    = K / V                                  # trigger frequency
     pi_val = pi_theory(L, V) if pi is None else pi
 
+    # ── signal to noise rations────────────────────────────────────────────
+    snr1 = m1 / eta1
+    snr2 = m2 / eta2
+
     # ── circuit success probabilities ──────────────────────────────────────
-    pp = P_prev(m, sigma1, d, L)                    # P_prev
-    pi_ind = P_ind(q, eta, d, L)                    # P_ind
+    P_L1 = success_prob(snr1, L)                    # P_L1(m1, sigma1)
+    P_L2 = success_prob(snr2, L)                    # P_L2(q, eta)
 
     # ── readout gain ───────────────────────────────────────────────────────
     dL = delta_L(gamma, V)                          # DeltaL(gamma)
     # print(f"Debug: P_prev={pp}, P_ind={pi_ind}, DeltaL={dL}, eps={eps}, pi={pi_val}")
     # ── effective loss ─────────────────────────────────────────────────────
-    L_eff = log_V - eps * pi_val * pp * pi_ind * dL
+    L_eff = log_V - eps * pi_val * P_L1 * P_L2 * dL
 
     if not return_components:
         return L_eff
 
-    # ── diagnostic breakdown ───────────────────────────────────────────────
-    snr1 = m * (d ** 0.5) / sigma1.clamp(min=1e-8)
-    snr2 = q * (d / eta.clamp(min=1e-8)) ** 0.5
 
     return {
-        "loss_eff":           L_eff,
-        "P_prev":          pp,
-        "P_ind":           pi_ind,
-        "delta_L":         dL,
-        "SNR_layer1":      snr1,
-        "SNR_layer2":      snr2,
-        "pi":              torch.tensor(pi_val),
-        "gain_term":       eps * pi_val * pp * pi_ind * dL,
+        "loss_eff":         L_eff,
+        "P_L1":             P_L1,
+        "P_L2":             P_L2,
+        "delta_L":          dL,
+        "SNR1":             snr1,
+        "SNR2":             snr2,
+        "pi":               torch.tensor(pi_val),
+        "gain_term":        eps * pi_val * P_L1 * P_L2* dL,
     }
 

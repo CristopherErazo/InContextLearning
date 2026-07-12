@@ -84,6 +84,7 @@ def get_distributions(args, vocab_size:int, device:str='cpu') -> tuple[torch.Ten
     P_t = P_u.clone() # Trigger distribution is the same as unigram distribution
     P_o = torch.ones((vocab_size,vocab_size)) / (vocab_size-1) # Uniform distribution over outputs given triggers apart from the trigger token itself
     P_o.fill_diagonal_(0) # Set diagonal to 0 since output cannot be the same as the trigger token
+    
 
     # return P_b.to(device), P_u.to(device), P_o.to(device), P_t.to(device)
     # Return a dictionary of the distributions for better readability
@@ -232,7 +233,7 @@ def generate_dual_task_batch(num_samples: int,
 
         sequence[:, t + 1] = next_tokens
 
-    mask = torch.tril(torch.ones((L, L), dtype=torch.bool)) # (1, L, L) for multi-head attention
+    mask = torch.tril(torch.ones((L, L), dtype=torch.bool),diagonal=-1) # (1, L, L) for multi-head attention
     batch_mask = mask.unsqueeze(0).expand(B, -1, -1) # (batch_size, seq_len, seq_len)
     
     return {

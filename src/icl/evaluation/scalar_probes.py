@@ -1,5 +1,5 @@
 import torch
-
+import math
 
 def compute_kl(P, Q):
     "P and Q are distributions over the same support, shape (..., vocab_size) = (B,L,V) usually"
@@ -23,6 +23,12 @@ class EvalContext:
         self.seq_len = self.input.size(1)
 
         self.model = model
+        self.rank = model.rank
+        self.vocab_size = model.vocab_size
+        self.beta = model.beta
+
+        
+        self.d_model = model.d_model
         self.loss_fn = loss_fn
         self.P_b = P_b.to(device) # shape (V, V)
         self.P_u = P_u.to(device) # shape (V,)
@@ -44,22 +50,44 @@ class EvalContext:
         WQ = model.attn1.WQ.weight.data # shape (r, d)
         WK = model.attn1.WK.weight.data # shape (r, d)
         self.WQK1 = WQ.t() @ WK # shape (d, d)
+        # self.WQK1 = model.attn1.WQK.weight.data.T # shape (d, d)
+        self.P_WQK1_P = self.pos @ self.WQK1 @ self.pos.t() / math.sqrt(self.rank) # shape (L, L)
+        self.mask_sub_diagonal = torch.diag(torch.ones(self.seq_len-1, dtype=torch.bool), diagonal=-1)
+        self.mask_tril = torch.tril(torch.ones((self.seq_len, self.seq_len), dtype=torch.bool))
+        self.mask_sub_diagonal_tril = self.mask_tril & ~self.mask_sub_diagonal
+
         WV = model.attn1.WV.weight.data # shape (r, d)
         WO = model.attn1.WO.weight.data # shape (d, r)
         self.WOV1 = WO @ WV # shape (d, d)
+        # self.WOV1 = model.attn1.WOV.weight.data # shape (d, d)
         
         WQ = model.attn2.WQ.weight.data # shape (r, d)
         WK = model.attn2.WK.weight.data # shape (r, d)
         self.WQK2 = WQ.t() @ WK # shape (d, d)
+        # self.WQK2 = model.attn2.WQK.weight.data # shape (d, d)
+
+        self.M = self.WQK2 #@ self.WOV1 # shape (d, d)
+        self.E_M_E = self.E @ self.M @ self.E.t() / math.sqrt(self.rank) # shape (V, V) 
+
+        self.mask_trigg_trigg = torch.zeros((self.vocab_size, self.vocab_size), dtype=torch.bool, device=device)
+        self.mask_trigg_trigg[self.trigger_set_unique, self.trigger_set_unique] = True
+        self.mask_trigg_nontrigg = ~self.mask_trigg_trigg
+
         WV = model.attn2.WV.weight.data # shape (r, d)
         WO = model.attn2.WO.weight.data # shape (d, r)
         self.WOV2 = WO @ WV # shape (d, d)
-
-        self.M = self.WQK2 @ self.WOV1 # shape (d, d)
-
+        # self.WOV2 = model.attn2.WOV.weight.data # shape (d, d)
         self.U = model.unembed.U.weight.data # shape (V, d)
+        self.U_WOV2_E = self.U @ self.WOV2 @ self.E.t()  # shape (V, V)
 
+        self.mask_tok_tok = torch.diag(torch.ones(self.vocab_size, dtype=torch.bool), diagonal=0)
+        self.mask_tok_nontok = ~self.mask_tok_tok
 
+        
+
+        
+
+    
 
 class IC_TopKAccuracy:
     def __init__(self, k):
@@ -137,12 +165,41 @@ class LogitStdMetric:
         
         return logits_masked.std().item()
 
-# Order Parameters 
-class M:
-    def __init__(self):
-        self.name = 'm'
+# Order Parameters
+
+class OrderParameterMetric:
+    def __init__(self, 
+                 name = 'q', 
+                 values_fn = lambda ctx: ctx.P_WQK1_P, 
+                 mask_fn = lambda ctx: ctx.mask_sub_diagonal,
+                 type = 'mean',
+                 constant_factor = 1.0
+                 ):
+        self.name = name
+        self.values_fn = values_fn
+        self.mask_fn = mask_fn
+        self.type = type
+        self.constant_factor = constant_factor
     def __call__(self, ctx):
-        # ── m : average p_s^T WQK1 p_{s-1} over adjacent pairs ─────────────────
+        values = self.values_fn(ctx)
+        mask = self.mask_fn(ctx)
+
+        masked_values = values[mask]
+
+        if self.type == 'mean':
+            return masked_values.mean().item() * self.constant_factor
+        elif self.type == 'std':
+            return masked_values.std().item() * self.constant_factor
+        else:
+            raise ValueError(f"Unknown type {self.type} for OrderParameterMetric")
+
+
+
+class M1:
+    def __init__(self):
+        self.name = 'm1'
+    def __call__(self, ctx):
+        # ── m1 : average p_s^T WQK1 p_{s-1} over adjacent pairs ─────────────────
         WQK1 = ctx.WQK1 # shape (d, d)
         P = ctx.pos # shape (L, d)
         idx = torch.arange(1, ctx.seq_len, device=P.device) # shape (L-1,)
@@ -150,47 +207,83 @@ class M:
         p_sm1 = P[idx - 1]                 # (L-1, d)
         # p_s^T A1 p_{s-1} for each pair, then average
         m_vals = (p_s @ WQK1 * p_sm1).sum(dim=-1) # shape (L-1,)
-        m = m_vals.sum()
-        return m.item() / WQK1.size(0)**2 
+        m = m_vals.mean()
+        # return m.item() / (math.sqrt(ctx.d_model))    # Divided by sqrt(rank) to make it comparable across ranks
+        return m.item() / math.sqrt(ctx.rank)
 
-class Sigma1:
+
+class center1:
     def __init__(self):
-        self.name = 'sigma1'
+        self.name = 'center1'
     def __call__(self, ctx):
-        # ── sigma1 : ||WQK1||_F / sqrt(d) ───────────────────────────────────────
         WQK1 = ctx.WQK1 # shape (d, d)
-        d = WQK1.size(0)
-        sigma1 = WQK1.norm(p='fro') / d
-        return sigma1.item()
+        trace = torch.trace(WQK1)
+        const = (1/(ctx.seq_len+1))*(4 + (ctx.seq_len-1)/ctx.vocab_size)
+        return trace.item() * const
+        
+class Eta1:
+    def __init__(self,mode='norm'):
+        self.name = 'eta1'
+        self.mode = mode
+    def __call__(self, ctx):
+        if self.mode == 'norm':
+            # ── sigma1 : ||WQK1||_F / sqrt(r) ───────────────────────────────────────
+            WQK1 = ctx.WQK1 # shape (d, d)
+            WWT = WQK1 @ WQK1.t()
+            trace1 = torch.trace(WWT)
+            # WW = WQK1 @ WQK1
+            # trace2 = torch.trace(WW)
+            # const = (1/(ctx.seq_len+1))*(6+ (ctx.seq_len-1)/ctx.vocab_size)
+            # variance  = trace1 #+ const*trace2
+            # sigma1 = math.sqrt(variance)
+            # sigma1 = WQK1.norm(p='fro') 
+            # return 4*sigma1.item() / math.sqrt(ctx.d_model)
+            return math.sqrt(trace1) / math.sqrt(ctx.rank)
+        elif self.mode == 'std':
+            # ── sigma1 : std of p_s^T WQK1 p_{s-1} random pairs ───────────────────────────────────────
+            WQK1 = ctx.WQK1 # shape (d, d)
+            P = ctx.pos # shape (L, d)
+            idx = torch.randperm(ctx.seq_len - 1, device=P.device) # shape (L-1,)
+            p_s   = P[idx]                     # (L-1, d)
+            idx = torch.randperm(ctx.seq_len - 1, device=P.device) # shape (L-1,)
+            p_s_prime = P[idx]                 # (L-1, d)
+            # p_s^T A1 p_{s'}m1 for each pair, then take std
+            m_vals = (p_s @ WQK1 * p_s_prime).sum(dim=-1) # shape (L-1,)
+            sigma1 = m_vals.std()
+            return sigma1.item() / ctx.d_model
+        else:
+            raise ValueError(f"Unknown mode {self.mode} for Eta1")
 
-class Q:
+
+class M2:
     def __init__(self):
-        self.name = 'q'
+        self.name = 'm2'
     def __call__(self, ctx):
         # ── q : average e_t^T M e_t over t in trigger_set_unique ─────────────────
         M = ctx.M                                # (d, d)
-        WOV1 = ctx.WOV1                          # (d, d)
-        normWOV1 = WOV1.norm(p='fro') 
+        # M = ctx.WQK2
+        # WOV1 = ctx.WOV1                          # (d, d)
+        # normWOV1 = WOV1.norm(p='fro') 
         idx = ctx.trigger_set_unique # shape (K,)
         e_t = ctx.E[idx]           # shape (K, d)
         q_vals = (e_t @ M * e_t).sum(dim=-1) # shape (K,)
-        q = q_vals.sum()
-        return q.item()/(normWOV1 * M.size(0))
-        # # ── q = tr(M) / d ─────────────────────────────────────────────────────
-        # q = M.trace() / M.size(0)
-        # return q.item()
+        q = q_vals.mean()
+        # q = q / (normWOV1 * M.size(0))
+        return 0.5*q.item()/ math.sqrt(ctx.rank)
+        # return q.item() / math.sqrt(ctx.d_model)
 
-class Eta:
+
+class Eta2:
     def __init__(self):
-        self.name = 'eta'
+        self.name = 'eta2'
     def __call__(self, ctx):
         # ── eta = ||M||_F / sqrt(d) ───────────────────────────────────────────────
         WQK2 = ctx.WQK2 # shape (d, d)
-        WOV1 = ctx.WOV1                          # (d, d)
-        normWOV1 = WOV1.norm(p='fro') 
-        d = WQK2.size(0)
-        eta = WQK2.norm(p='fro') / normWOV1
-        return eta.item()
+        # WOV1 = ctx.WOV1                          # (d, d)
+        # normWOV1 = WOV1.norm(p='fro') 
+        eta = WQK2.norm(p='fro')
+        return eta.item()/math.sqrt(4*ctx.rank)
+        # return eta.item() * math.sqrt(ctx.d_model)/16
     
 class Gamma:
     def __init__(self):
@@ -201,10 +294,20 @@ class Gamma:
         U = ctx.U # shape (V, d)
         E = ctx.E # shape (V, d)
         gamma_vals = (U @ WOV2 * E).sum(dim=-1) # shape (V,)
-        gamma = gamma_vals.sum()
-        return gamma.item()/U.size(1) # normalize by d
+        gamma = gamma_vals.mean()
+        return gamma.item()#/U.size(1) # normalize by d
 
-        
+class Eta_Gamma:
+    def __init__(self):
+        self.name = 'eta_gamma'
+    def __call__(self, ctx):
+        # ── eta = ||M||_F / sqrt(d) ───────────────────────────────────────────────
+        WOV2 = ctx.WOV2 # shape (d, d)
+        # WOV1 = ctx.WOV1                          # (d, d)
+        # normWOV1 = WOV1.norm(p='fro') 
+        eta = WOV2.norm(p='fro')
+        return ctx.beta*eta.item()/math.sqrt(2*ctx.d_model)
+        # return eta.item() * math.sqrt(ctx.d_model)/16       
 
 class Evaluator:
     def __init__(self, metrics):

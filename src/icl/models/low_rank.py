@@ -11,8 +11,9 @@ class EmbeddingModule(nn.Module):
         self.d_model = d_model
     
     def forward(self, x):
+        "x.shape = (B,L)"
         positions = torch.arange(x.size(1), device=x.device)
-        return (self.E(x) + self.P(positions))
+        return (self.E(x) + self.P(positions))/math.sqrt(2) # shape = (B,L,d)
 
 class AttentionLayer(nn.Module):
     def __init__(self, d_model, rank, dropout=0.0, lin_attn=False):
@@ -33,14 +34,14 @@ class AttentionLayer(nn.Module):
         # (B,L,r) @ (B,r,L) --> (B,L,L)
         S = q @ k.transpose(-2, -1)/math.sqrt(self.rank)
         if self.lin_attn:
-            A = S.masked_fill(~mask, 0.0)
+            A = S.masked_fill(~mask, 0.0)/math.sqrt(self.rank) #(B,L,L)
         else:
             A = (S.masked_fill(~mask, float('-inf'))).softmax(dim=-1)
 
         A = self.dropout(A)
         Y = A @ v #(B,L,r) 
         Y = self.WO(Y) #(B,L,d)
-        return X + Y, A, S
+        return (X + Y)/math.sqrt(2), A, S
     
 
 class FeedForwardLayer(nn.Module):
@@ -73,6 +74,7 @@ class LowRankTransformer(nn.Module):
         self.drop = args.dropout
         self.lin_attn = args.lin_attn
         self.rank = args.rank
+        self.beta = args.beta
 
         self.embed = EmbeddingModule(self.vocab_size, self.seq_len, self.d_model)
         self.attn1 = AttentionLayer(self.d_model, self.rank, self.drop, self.lin_attn)
@@ -95,7 +97,7 @@ class LowRankTransformer(nn.Module):
         else:
             X3 = X2
 
-        logits = self.unembed(X3)
+        logits = self.unembed(X3)*self.beta
         return logits
     
     def full_output(self, x, mask, path="full"):
@@ -116,15 +118,15 @@ class LowRankTransformer(nn.Module):
         else:
             X3 = X2
             out['X3'] = X3
-        out['logits'] = self.unembed(X3)
+        out['logits'] = self.unembed(X3)*self.beta
         return out
 
 
-def initialize_model(model,path="full",sigma_0=0.5):
+def initialize_model(model,path="full",sigma_0=1.0):
     # Initialize E,P,U ~ N(0,1), WO ~N(0,1/sqrt(r) and the rest ~ N(0,1/sqrt(d_model))
     for name, param in model.named_parameters():
         if "embed.E" in name or "embed.P" in name:
-            param.data.copy_(sigma_0*torch.randn_like(param))
+            param.data.copy_(torch.randn_like(param))
         elif "WO" in name:
             param.data.copy_(sigma_0*torch.randn_like(param) / math.sqrt(model.rank))
         else:

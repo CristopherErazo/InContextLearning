@@ -11,7 +11,7 @@ class EmbeddingModule(nn.Module):
     
     def forward(self, x):
         positions = torch.arange(x.size(1), device=x.device)
-        return self.E(x) + self.P(positions)
+        return (self.E(x) + self.P(positions))/math.sqrt(2)
 
 class AttentionLayer(nn.Module):
     def __init__(self, d_model, dropout=0.0, lin_attn=False):
@@ -22,17 +22,16 @@ class AttentionLayer(nn.Module):
         self.lin_attn = lin_attn
 
     def forward(self, X, mask):
-        S = self.WQK(X) @ X.transpose(-2, -1)
+        S = self.WQK(X) @ X.transpose(-2, -1)/math.sqrt(X.size(-1))
         if self.lin_attn:
             A = S.masked_fill(~mask, 0.0)/math.sqrt(X.size(-1))
         else:
-            S = S*math.sqrt(X.size(-1))
-            S = S.masked_fill(~mask, float('-inf'))
-            A = S.softmax(dim=-1)
+            S = S
+            A = (S.masked_fill(~mask, float('-inf'))).softmax(dim=-1)
 
         A = self.dropout(A)
         Y = A @ self.WOV(X)
-        return X + Y, A
+        return X + Y, A , S
     
 
 class FeedForwardLayer(nn.Module):
@@ -74,8 +73,8 @@ class DualModel(nn.Module):
         X0 = self.embed(x)
 
         if path in ["induction", "full"]:
-            X1, _ = self.attn1(X0, mask)
-            X2, _ = self.attn2(X1, mask)
+            X1, _, _ = self.attn1(X0, mask)
+            X2, _, _ = self.attn2(X1, mask)
         else:
             X2 = X0
 
@@ -92,10 +91,10 @@ class DualModel(nn.Module):
         X0 = self.embed(x)
         out['X0'] = X0
         if path in ["induction", "full"]:
-            X1, A1 = self.attn1(X0, mask)
-            out['X1'], out['A1'] = X1, A1
-            X2, A2 = self.attn2(X1, mask)
-            out['X2'], out['A2'] = X2, A2
+            X1, A1 , S1 = self.attn1(X0, mask)
+            out['X1'], out['A1'], out['S1'] = X1, A1, S1
+            X2, A2 , S2 = self.attn2(X1, mask)
+            out['X2'], out['A2'] , out['S2']= X2, A2 , S2
         else:
             X2 = X0
             out['X2'] = X2
@@ -109,15 +108,17 @@ class DualModel(nn.Module):
         return out
     
    
-def initialize_model(model,path="full"):
+def initialize_model(model,path="full",sigma_0=1.0):
     """ 
     Initialize model as ~ N(0, 1/sqrt(d_model)) and freeze: 
     [ embedding, positional embedding, unembedding, VO projection of first attention]
     """
-
     # Initialize and freeze them all at first
-    for param in model.parameters():
-        param.data.copy_(torch.randn_like(param) / math.sqrt(model.d_model))
+    for name, param in model.named_parameters():
+        if "embed.E" in name or "embed.P" in name:
+            param.data.copy_(torch.randn_like(param))
+        else:
+            param.data.copy_(sigma_0*torch.randn_like(param) / math.sqrt(model.d_model))
         param.requires_grad = False
 
     # Unfreeze depending on the path

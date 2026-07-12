@@ -8,17 +8,13 @@ from icl.evaluation import (
     IC_TopKAccuracy,
     KLMetric,
     LossMetric,
-    M,
-    Gamma,
-    Eta,
-    Q,
-    Sigma1,
     loss_eff
 )
 from icl.models import (
     DualModel, 
     initialize_model,
-    LowRankTransformer
+    LowRankTransformer,
+    MinimalTransformer
 )
 
 

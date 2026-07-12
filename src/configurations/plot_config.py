@@ -51,7 +51,9 @@ def apply_general_styles():
         'axes.spines.right': False,
         'figure.dpi': 150,
         'text.usetex': False,
-        'text.latex.preamble': r'\usepackage{amsmath,amssymb}'
+        'text.latex.preamble': r'\usepackage{amsmath,amssymb}',
+        # Linewidths of plots
+        'lines.linewidth': 1.7,
     })
 
 
