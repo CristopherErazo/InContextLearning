@@ -7,6 +7,6 @@ log/
 logs/
 data/
 *egg-info/  
-
+plots/
 # Allow src/icl/data
 !src/icl/data/

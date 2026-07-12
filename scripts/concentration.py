@@ -9,17 +9,16 @@ import torch
 from tracklab import ExperimentTracker
 from icl import *
 from icl.evaluation.utils import get_sub_batch
-from icl.evaluation.scalar_probes import M1, Eta1, M2, Eta2, Gamma, OrderParameterMetric, center1, Eta_Gamma
-from icl.evaluation.tensor_probes import get_order_parameters
+from icl.evaluation.tensor_probes import get_logits
 
 
 
 @dataclass
 class ModelArgs:
     vocab_size: int = 16  # Vocabulary size
-    seq_len: int = 16 # Sequence length
+    seq_len: int = 32 # Sequence length
     d_model: int = 512 # Model dimension
-    rank: int = 16   # rank or matrices
+    rank: int = 64   # rank or matrices
     dropout: float = 0.0 # Dropout rate
     lin_attn: bool = True # Whether to use linear attention or not
     beta: float = 0.5 # Scaling factor for the output logits (inverse of the temperature)
@@ -36,7 +35,7 @@ class DataArgs:
     trig_type: Optional[str] = 'rand' # Type of fixed trigger tokens if fix_trig is True (options are 'freq', 'rare' and 'rand')
     batch_size: int = 1024 # Batch size for training
     test_size: int = 200 # Number of samples in the test set
-    K : int = 4 # Number of trigger tokens  
+    K : int = 8 # Number of trigger tokens  
 
 @dataclass
 class OptimArgs:
@@ -51,10 +50,10 @@ class ExtraArgs:
     n_prints: int = 50 # Number of times to print during training.
     n_prints_model: int = 10 # Number of times to save model checkpoints during training.
     print_scale: str = 'linear' # Scale for printing steps: log or linear
-    experiment_name: str = 'minimal_model' # Name of the experiment for saving results
+    experiment_name: str = 'concentration_test' # Name of the experiment for saving results
     file_name: str = 'results' # Name of the file for saving results
     path: str = "induction" # Path to follow (options are "full", "induction" and "bigram")
-    extra: str = "hola" # Extra string to add to the experiment name for saving results
+    extra: str = " " # Extra string to add to the experiment name for saving results
 
 @dataclass
 class TrainerArgs:
@@ -112,35 +111,44 @@ def main():
 
     # Initialize Model
     # model = DualModel(cfg.model_args).to(device)
-    # model = LowRankTransformer(cfg.model_args).to(device)
+    model1 = LowRankTransformer(cfg.model_args).to(device)
+    model1 = initialize_model(model1,path=path,sigma_0=1.0)
 
-    model = MinimalTransformer(cfg.model_args).to(device)
-    model = initialize_model(model,path=path,sigma_0=1.0)
+    model2 = LowRankTransformer(cfg.model_args).to(device)
+    model2 = initialize_model(model2,path=path,sigma_0=1.0)
+
+    # Assert they have different initializations
+    for p1, p2 in zip(model1.parameters(), model2.parameters()):
+        assert not torch.allclose(p1, p2), "Models have the same initialization!"
 
     # Define triggers
     trigger_set = get_triggers(cfg.data_args, distributions['P_t'])#.to(device)
 
     # Print trainable parameters
     logger.info("Trainable parameters:")
-    for name, param in model.named_parameters():
+    for name, param in model1.named_parameters():
         if param.requires_grad:
             logger.info(f"{name}, {param.shape}")
 
     # Define loss and optimizer
     loss_fn = torch.nn.CrossEntropyLoss()
-    trainable_params = filter(lambda p: p.requires_grad, model.parameters())
+    trainable_params1 = filter(lambda p: p.requires_grad, model1.parameters())
+    trainable_params2 = filter(lambda p: p.requires_grad, model2.parameters())
     
     kwargs = {'lr': cfg.optim_args.lr,'weight_decay': cfg.optim_args.weight_decay}
     if opt_name == 'sgd':
         logger.info("Using SGD optimizer")
         kwargs['momentum'] = cfg.optim_args.momentum
-        optimizer = torch.optim.SGD(trainable_params, **kwargs)
+        optimizer1 = torch.optim.SGD(trainable_params1, **kwargs)
+        optimizer2 = torch.optim.SGD(trainable_params2, **kwargs)
     elif opt_name == 'adam':
         logger.info("Using Adam optimizer")
-        optimizer = torch.optim.Adam(trainable_params, **kwargs)
+        optimizer1 = torch.optim.Adam(trainable_params1, **kwargs)
+        optimizer2 = torch.optim.Adam(trainable_params2, **kwargs)
     elif opt_name == 'adamw':
         logger.info("Using AdamW optimizer")
-        optimizer = torch.optim.AdamW(trainable_params, **kwargs)
+        optimizer1 = torch.optim.AdamW(trainable_params1, **kwargs)
+        optimizer2 = torch.optim.AdamW(trainable_params2, **kwargs)
     else:
         raise ValueError("Invalid optimizer type. Options are 'SGD', 'adam', and 'adamW'.")
 
@@ -150,7 +158,7 @@ def main():
                                           distributions,
                                           trigger_set=trigger_set)
                                         #   device=device)
-    sub_batch = get_sub_batch(test_batch,device = device, n_test=18)
+    sub_batch = get_sub_batch(test_batch,device = device, n_test=15)
 
 
 
@@ -163,68 +171,21 @@ def main():
 
     metrics = [
         IC_TopKAccuracy(1),
-        # IC_TopKAccuracy(3),
         LossMetric(name = "loss",
                    logits_fn = lambda ctx: ctx.logits_induction[ctx.all],
                    target_fn = lambda ctx: ctx.target[ctx.all],
-                   rescale = True),
-        OrderParameterMetric(name = "m1",
-                            values_fn = lambda ctx: ctx.P_WQK1_P,
-                            mask_fn = lambda ctx: ctx.mask_sub_diagonal,
-                            type = 'mean',
-                            constant_factor = 1.0/math.sqrt(2)),
-        Eta1(),
-        center1(),
-        # OrderParameterMetric(name = "eta1",
-        #                     values_fn = lambda ctx: ctx.P_WQK1_P,
-        #                     mask_fn = lambda ctx: ctx.mask_sub_diagonal_tril,
-        #                     type = 'std',
-        #                     constant_factor = 1.0),
-        OrderParameterMetric(name = "m2",
-                            values_fn = lambda ctx: ctx.E_M_E,
-                            mask_fn = lambda ctx: ctx.mask_trigg_trigg,
-                            type = 'mean',
-                            constant_factor = math.sqrt(4)/8),
-        # OrderParameterMetric(name = "eta2",
-        #                     values_fn = lambda ctx: ctx.E_M_E,
-        #                     mask_fn = lambda ctx: ctx.mask_trigg_nontrigg,
-        #                     type = 'std',
-        #                     constant_factor = 0.25),
-        Eta2(),
-        OrderParameterMetric(name = "gamma",
-                            values_fn = lambda ctx: ctx.U_WOV2_E,
-                            mask_fn = lambda ctx: ctx.mask_tok_tok,
-                            type = 'mean',
-                            constant_factor = cfg.model_args.beta*math.sqrt(2)/4),
-        # OrderParameterMetric(name = "eta_gamma",
-        #                     values_fn = lambda ctx: ctx.U_WOV2_E,
-        #                     mask_fn = lambda ctx: ctx.mask_tok_nontok,
-        #                     type = 'std',
-        #                     constant_factor = cfg.model_args.beta), 
-        Eta_Gamma()    
+                   rescale = True)
         ]
-
-
 
 
     evaluator = Evaluator(metrics)
 
-    matrix_order_parameters={
-            'u_ov2_p': [],
-            'u_ov2_e': [],
-            'u_ov2_ov1_p': [],
-            'u_ov2_ov1_e': [],
-            'e_qk2_e': [],
-            'p_qk2_p': [],
-            'e_qk2_ov1_e': [],
-            'p_qk2_ov1_p': [],
-            'e_ov1_qk2_e': [],
-            'p_ov1_qk2_p': [],
-            'e_ov1_qk2_ov1_e': [],
-            'p_ov1_qk2_ov1_p': [],
-            'e_qk1_e': [],
-            'p_qk1_p': []
-        }
+    logits = {
+        'model1': [],
+        'model2': []
+    }
+
+
 
 
     # Training loop parameters
@@ -241,49 +202,28 @@ def main():
         print_total_steps = np.linspace(0, total_steps-1, num=nprints).astype(int)
         print_total_steps_model = np.linspace(0, total_steps-1, num=nprints_model).astype(int)
 
-    logger.info(f"Step/{total_steps}\t" + "\t".join(m.name for m in metrics) + "\t loss_eff")
-    
+  
     t0 = time.time()
 
     logger.info("Starting training")
     for step in range(total_steps):
         # Evaluations and logging of scalars
         if step in print_total_steps:
-            res = evaluator.evaluate(model, test_batch, loss_fn, distributions['P_b'], distributions['P_u'])
-            theory = loss_eff(res['m1'],
-                             res['eta1'],
-                             res['m1'],
-                             res['eta2'],
-                             res['gamma'],
-                             d=cfg.model_args.d_model,
-                             L=cfg.model_args.seq_len,
-                             V=cfg.model_args.vocab_size,
-                             K=cfg.data_args.K,
-                             return_components=True
-                             )
-            theory = {k: v.item() for k, v in theory.items()}
-            res = {**res, **theory}
-            # res['loss_eff'] = L_eff.item()
+            logg_dict = {"step": step}
+            res = evaluator.evaluate(model1, test_batch, loss_fn, distributions['P_b'], distributions['P_u'])
+            run.track_metric(step, note = 'model1', **res)
+            logg_dict.update({f"model1_{k}": v for k, v in res.items()})
+            res = evaluator.evaluate(model2, test_batch, loss_fn, distributions['P_b'], distributions['P_u'])
+            run.track_metric(step, note = 'model2', **res)
+            logg_dict.update({f"model2_{k}": v for k, v in res.items()})
 
-            run.track_metric(step, **res)
-            logger.info(f"{step}\t" + "\t".join(f"{v:.4f}" for v in res.values()))
-            ord_par = get_order_parameters(model)
-            for k, v in ord_par.items():
-                matrix_order_parameters[k].append(v)
+
+            logger.info("\t".join(f"{k}={v:.4f}" for k, v in logg_dict.items()))
 
             
-            # res = evaluator.evaluate(model, test_batch, loss_fn, distributions['P_b'], distributions['P_u'])
-            # run.track_metric(step, res, split="test")
+            logits['model1'].append(get_logits(model1, sub_batch, path, device).cpu().numpy())
+            logits['model2'].append(get_logits(model2, sub_batch, path, device).cpu().numpy())
             
-        # Evaluations and logging of attention patterns
-        if step in print_total_steps_model:
-            att_patterns = get_attention_patterns(model, sub_batch , path, device)
-            logger.info(f'Saving attention patterns at step {step} with shapes: ' + ", ".join(f"{k}: {v.shape}" for k, v in att_patterns.items()))
-            for k, v in att_patterns.items():
-                run.track_artifact(v.cpu().numpy() if isinstance(v, torch.Tensor) else v, step, k)
-            # W = model.attn1.WQK.weight.data.detach().cpu().numpy()
-            # eivals = np.linalg.eigvals(W)
-            # run.track_artifact(eivals,step,'WQK1_eigenvals',type='tensor')
             
         
         batch = generate_dual_task_batch(batch_size,
@@ -293,15 +233,22 @@ def main():
                                           trigger_set=trigger_set)
                                         #   device=device)
 
-        loss = evaluate_model(model,batch,loss_fn,path,device)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        loss1 = evaluate_model(model1,batch,loss_fn,path,device)
+        optimizer1.zero_grad()
+        loss1.backward()
+        optimizer1.step()
+
+        loss2 = evaluate_model(model2,batch,loss_fn,path,device)
+        optimizer2.zero_grad()
+        loss2.backward()
+        optimizer2.step()
+
+
     # Convert matrix order parameters to numpy arrays and save as artifacts
-    for k, v in matrix_order_parameters.items():
-        matrix_order_parameters[k] = np.array(v)
-        print(f"Final shape of {k}: {matrix_order_parameters[k].shape}")
-        run.track_artifact(matrix_order_parameters[k], name=k, type='tensor')
+    for k, v in logits.items():
+        logits[k] = np.array(v)
+        print(f"Final shape of {k}: {logits[k].shape}")
+        run.track_artifact(logits[k], name=f"{k}_logits", type='tensor')
     # Save sub_batch for final evaluation
     run.track_artifact(sub_batch,name='sub_batch',type='pickle')
 
