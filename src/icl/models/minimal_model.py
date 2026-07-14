@@ -42,7 +42,7 @@ class AttentionLayer(nn.Module):
 
         A = self.dropout(A)
         Y = A @ v #(B,L,r) 
-        Y = self.WO(Y) #(B,L,d)
+        Y = self.WO(Y)/math.sqrt(2) #(B,L,d)
         return Y, A, S
 
 
@@ -88,7 +88,6 @@ class MinimalTransformer(nn.Module):
         out['X2'], out['A2'], out['S2'] = X2, A2, S2
 
         out['logits'] = self.unembed(X2)*self.beta
-        print(f"{out['logits'].shape = }, {out['A1'].shape = }, {out['A2'].shape = }, {out['S1'].shape = }, {out['S2'].shape = }")
         return out
 
 

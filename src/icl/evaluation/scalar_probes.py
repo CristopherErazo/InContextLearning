@@ -1,5 +1,6 @@
 import torch
 import math
+from .utils import on_off_masks
 
 def compute_kl(P, Q):
     "P and Q are distributions over the same support, shape (..., vocab_size) = (B,L,V) usually"
@@ -13,6 +14,7 @@ class EvalContext:
         self.sequence = batch['sequence'].to(device) # shape (B, L+1)
         self.input = self.sequence[:, :-1] # shape (B, L)
         self.target = self.sequence[:, 1:] # shape (B, L)
+        self.is_trigger = batch['is_trigger'].to(device) # shape (B, L)
         self.counts = batch['counts'].to(device) # shape (B, L)
         self.mask = batch['mask'].to(device) # shape (B, L, L)
         self.trigger_set = batch['trigger_set'].to(device) # shape (B, K)
@@ -26,6 +28,8 @@ class EvalContext:
         self.rank = model.rank
         self.vocab_size = model.vocab_size
         self.beta = model.beta
+
+
 
         
         self.d_model = model.d_model
@@ -41,6 +45,15 @@ class EvalContext:
             self.model_prob = torch.softmax(self.logits, dim=-1) # shape (B, L, V)
             self.model_prob_bigram = torch.softmax(self.logits_bigram, dim=-1) # shape (B, L, V)
             self.std_logits = self.logits.std().item()
+        
+        # Masks for on-target and off-target logits
+        # generate a mask to apply to the logits (shape(B,L,V)) such that each element (b,l,v) is true
+        # it the input token at position l in batch b is a trigger and the counts for that trigger are larger than 1
+        # and the corresponding output token is v. This mask will be used to compute the on-target and off-target logits for each trigger token in the batch.
+
+        on_target_mask = batch["is_trigg"].bool().unsqueeze(-1) & (batch["counts"] > 1).unsqueeze(-1) 
+        on_target_mask = on_target_mask & (torch.arange(self.vocab_size, device=device).view(1, 1, -1) == batch["sequence"][:, 1:].unsqueeze(-1))
+
 
         # Matrices of the model
         
@@ -85,9 +98,40 @@ class EvalContext:
 
         
 
-        
 
-    
+class EvalContextLogits:
+    def __init__(self, model, batch, loss_fn, P_b=None, P_u=None):
+        device = next(model.parameters()).device
+
+        # Ground Variables
+        self.sequence = batch['sequence'].to(device) # shape (B, L+1)
+        self.input = self.sequence[:, :-1] # shape (B, L)
+        self.target = self.sequence[:, 1:] # shape (B, L)
+        self.is_trigg = batch['is_trigg'].to(device) # shape (B, L)
+        self.counts = batch['counts'].to(device) # shape (B, L)
+        self.mask = batch['mask'].to(device) # shape (B, L, L)
+        self.trigger_set = batch['trigger_set'].to(device) # shape (B, K)
+        self.trigger_set_unique = self.trigger_set[0] # shape (K,)
+        self.only_triggers = (self.input.unsqueeze(-1) == self.trigger_set.unsqueeze(1)).any(-1) & (self.counts >= 2) # shape (B, L)
+        self.only_non_triggers = ~( (self.input.unsqueeze(-1) == self.trigger_set.unsqueeze(1)).any(-1) ) # shape (B, L)
+        self.all = torch.ones_like(self.input, dtype=torch.bool) # shape (B, L)
+        
+        self.rank = model.rank
+        self.vocab_size = model.vocab_size
+        self.seq_len = model.seq_len
+
+        self.loss_fn = loss_fn  
+
+
+
+        with torch.no_grad():
+            self.logits = model(self.input, self.mask) # shape (B, L, V)
+
+        # Masks for on-target and off-target logits
+        # generate a mask to apply to the logits (shape(B,L,V)) such that each element (b,l,v) is true
+        # it the input token at position l in batch b is a trigger and the counts for that trigger are larger than 1
+        # and the corresponding output token is v. This mask will be used to compute the on-target and off-target logits for each trigger token in the batch.
+        self.on_target_mask , self.off_target_mask, _ = on_off_masks(self.logits.shape, batch, device=device)
 
 class IC_TopKAccuracy:
     def __init__(self, k):
@@ -164,6 +208,29 @@ class LogitStdMetric:
         logits_masked = self.logits_fn(ctx)
         
         return logits_masked.std().item()
+
+# On-Off target logits metrics
+
+class OnOffLogitsMetric:
+    def __init__(self,
+                 name = 'on_target_mean',
+                 mask_fn = lambda ctx: ctx.on_target_mask,
+                 type = 'mean'):
+        self.name = name
+        self.mask_fn = mask_fn
+        self.type = type
+    
+    def __call__(self, ctx):
+        mask = self.mask_fn(ctx)
+        logits_masked = ctx.logits[mask] 
+
+        if self.type == 'mean':
+            return logits_masked.mean().item()
+        elif self.type == 'std':
+            return logits_masked.std().item()
+        else:
+            raise ValueError(f"Unknown type {self.type} for OnOffLogitsMetric")
+        
 
 # Order Parameters
 
@@ -325,4 +392,19 @@ class Evaluator:
         return results
     
 
+class EvaluatorLogits:
+    def __init__(self, metrics):
+        self.metrics = metrics
+
+    def evaluate(self, model, batch,loss_fn):
+        model.eval()
+
+        ctx = EvalContextLogits(model, batch,loss_fn)
+
+        results = {}
+        for metric in self.metrics:
+            results[metric.name] = metric(ctx)
+
+        return results
+    
 

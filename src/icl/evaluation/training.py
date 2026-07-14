@@ -1,5 +1,21 @@
 import torch
 
+def get_optimizer(opt_name,trainable_params,lr,weight_decay=0.0,momentum=0.0):
+    
+    kwargs = {'lr': lr,'weight_decay': weight_decay}
+    if opt_name == 'sgd':
+        message = "Using SGD optimizer"
+        kwargs['momentum'] = momentum
+        optimizer = torch.optim.SGD(trainable_params, **kwargs)
+    elif opt_name == 'adam':
+        message = "Using Adam optimizer"
+        optimizer = torch.optim.Adam(trainable_params, **kwargs)
+    elif opt_name == 'adamw':
+        message = "Using AdamW optimizer"
+        optimizer = torch.optim.AdamW(trainable_params, **kwargs)
+    else:
+        raise ValueError("Invalid optimizer type. Options are 'SGD', 'adam', and 'adamW'.")
+    return optimizer, message
 
 def evaluate_model(model,batch,loss_fn,path,device):
     """ 

@@ -1,6 +1,6 @@
 import torch
 import math
-
+import numpy as np
 
 def compute_entropies_and_dkl(P_b:torch.Tensor,P_u:torch.Tensor):
     """ 
@@ -88,3 +88,38 @@ def get_sub_batch(test_batch, device, n_test = 5):
         "is_trigg": is_trigg, # shape (n_test, seq_len)
         "mask": mask # shape (n_test, seq_len, seq_len)
     }
+
+
+
+def on_off_masks(logit_shape, batch, device='cpu'):
+    batch_size, seq_len, vocab_size = logit_shape
+
+    is_trigg = batch['is_trigg'].to(device) # shape (batch_size, seq_len)
+    counts = batch['counts'].to(device) # shape (batch_size, seq_len)
+    target = batch['sequence'][:, 1:].to(device) # shape (batch_size, seq_len)
+
+    trigg_mask = is_trigg.bool().unsqueeze(-1) & (counts > 1).unsqueeze(-1) 
+    on_target_mask = (torch.arange(vocab_size, device=device).view(1, 1, -1) == target.unsqueeze(-1))
+    off_target_mask = ~on_target_mask
+    on_target_mask = trigg_mask & on_target_mask
+    off_target_mask = trigg_mask & off_target_mask
+
+
+    # create a mask for the logits that mask out the first 2 sequence positions
+    mask_first_two_positions = torch.ones(logit_shape, dtype=torch.bool, device=device)  # shape (batch_size, seq_len, vocab_size)
+    mask_first_two_positions[:, :2, :] = False
+
+    on_target_mask = on_target_mask & mask_first_two_positions
+    off_target_mask = off_target_mask & mask_first_two_positions
+    all_mask = mask_first_two_positions & trigg_mask
+    return on_target_mask, off_target_mask, all_mask
+
+
+def get_evaluation_times(print_scale, total_steps, nprints, nprints_model):
+    if print_scale == 'log':
+        print_total_steps = np.unique(np.logspace(-0.01, np.log10(total_steps-1), num=nprints).astype(int))
+        print_total_steps_model = np.unique(np.logspace(-0.01, np.log10(total_steps-1), num=nprints_model).astype(int))
+    elif print_scale == 'linear':
+        print_total_steps = np.linspace(0, total_steps-1, num=nprints).astype(int)
+        print_total_steps_model = np.linspace(0, total_steps-1, num=nprints_model).astype(int)
+    return print_total_steps, print_total_steps_model
