@@ -11,38 +11,39 @@ from icl.models.minimal_model import MinimalTransformer, initialize_model
 from icl.evaluation.training import get_optimizer, evaluate_model
 from icl.data.trigg_data import generate_icl_task_batch 
 from icl.evaluation.utils import get_sub_batch, get_evaluation_times
-from icl.evaluation.scalar_probes import OnOffLogitsMetric, LossMetric, IC_TopKAccuracy, EvaluatorLogits
+from icl.evaluation.scalar_probes import OnOffLogitsMetric, LossMetric, IC_TopKAccuracy, EvaluatorLogits, M_Metric, Q_Metric, Gamma_Metric, Gamma_capital_Metric, Q_capital_Metric, EmpiricalLogits, Var_Metric_On, Var_Metric_Off
 from icl.evaluation.tensor_probes import get_logits
+from icl.evaluation.theory import effective_loss
 
 
 
 
 @dataclass
 class ModelArgs:
-    vocab_size: int = 64  # Vocabulary size
-    seq_len: int = 64 # Sequence length
-    d_model: int = 512 # Model dimension
-    rank: int = 64   # rank or matrices
+    vocab_size: int = 50  # Vocabulary size
+    seq_len: int = 40 # Sequence length
+    d_model: int = 1000 # Model dimension
+    rank: int = 25   # rank or matrices
     dropout: float = 0.0 # Dropout rate
     lin_attn: bool = True # Whether to use linear attention or not
-    beta: float = 0.3 # Scaling factor for the output logits (inverse of the temperature)
+    beta: float = 0.5 # Scaling factor for the output logits (inverse of the temperature)
     
 @dataclass
 class DataArgs:
     batch_size: int = 1024 # Batch size for training
-    test_size: int = 200 # Number of samples in the test set
-    K : int = 8 # Number of trigger tokens  
+    test_size: int = 500 # Number of samples in the test set
+    K : int = 4 # Number of trigger tokens  
 
 @dataclass
 class OptimArgs:
-    lr: float = 0.5
+    lr: float = 0.6
     opt: str = "sgd"
     momentum: float = 0.9
     weight_decay: float = 0.0
 
 @dataclass 
 class ExtraArgs:
-    total_steps: int = 2000 # Number of training steps
+    total_steps: int = 400 # Number of training steps
     n_prints: int = 50 # Number of times to print during training.
     n_prints_model: int = 20 # Number of times to save model checkpoints during training.
     print_scale: str = 'linear' # Scale for printing steps: log or linear
@@ -90,6 +91,7 @@ def main():
     # Initialize Model
     model = MinimalTransformer(cfg.model_args).to(device)
     model = initialize_model(model,sigma_0=1)
+    model.register_buffers(K)
 
     # Print trainable parameters
     logger.info("Trainable parameters:")
@@ -134,7 +136,15 @@ def main():
                           type = "mean"),
         OnOffLogitsMetric(name = "off_target_std",
                           mask_fn = lambda ctx: ctx.off_target_mask,
-                          type = "std")
+                          type = "std"),
+        M_Metric(),
+        Q_Metric(),
+        Gamma_Metric(),
+        Gamma_capital_Metric(),
+        Q_capital_Metric(),
+        EmpiricalLogits(),
+        Var_Metric_On(),
+        Var_Metric_Off()
         ]
     
     # Initialize evaluator with the defined metrics
@@ -155,8 +165,11 @@ def main():
         # Evaluations and logging of scalars
         if step in print_steps:
             res = evaluator.evaluate(model, test_batch,loss_fn=loss_fn)
+            theory = effective_loss(res,cfg.model_args.rank, vocab_size, K, cfg.model_args.beta,return_components=True)
+            res.update(theory)
+
             run.track_metric(step, **res)
-            logger.info(f"step {step}/{total_steps} \t loss = {res['loss']:.4f} \t  acc = {res['top1_accuracy']:.4f} ")
+            logger.info(f"step {step}/{total_steps} \t loss = {res['loss']:.4f} \t  acc = {res['top1_accuracy']:.4f} \t L_eff = {res['L_eff']:.4f} ")
             
         # Evaluations and logging of attention patterns
         if step in print_steps_model:

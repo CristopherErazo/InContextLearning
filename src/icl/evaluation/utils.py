@@ -92,6 +92,12 @@ def get_sub_batch(test_batch, device, n_test = 5):
 
 
 def on_off_masks(logit_shape, batch, device='cpu'):
+    """ 
+    generate a mask to apply to the logits (shape(B,L,V)) such that each element (b,l,v) is true
+    it the input token at position l in batch b is a trigger and the counts for that trigger are larger than 1
+    and the corresponding output token is v. 
+    This mask will be used to compute the on-target and off-target logits for each trigger token in the batch.
+    """ 
     batch_size, seq_len, vocab_size = logit_shape
 
     is_trigg = batch['is_trigg'].to(device) # shape (batch_size, seq_len)

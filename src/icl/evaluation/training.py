@@ -15,7 +15,7 @@ def get_optimizer(opt_name,trainable_params,lr,weight_decay=0.0,momentum=0.0):
         optimizer = torch.optim.AdamW(trainable_params, **kwargs)
     else:
         raise ValueError("Invalid optimizer type. Options are 'SGD', 'adam', and 'adamW'.")
-    return optimizer, message
+    return optimizer, message   
 
 def evaluate_model(model,batch,loss_fn,path,device):
     """ 

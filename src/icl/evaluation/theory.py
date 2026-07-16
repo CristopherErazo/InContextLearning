@@ -1,23 +1,3 @@
-"""
-Effective loss L_eff for the induction head emergence theory.
-
-    L_eff = log(V) - (K/V) * pi * Phi(m * sqrt(d) / sigma1)^(L-1)
-                                 * Phi(q * sqrt(d / eta))^(L-1)
-                                 * DeltaL(gamma)
-
-where:
-    DeltaL(gamma) = log(V) - log(1 + (V-1) * exp(-gamma))
-
-Order parameters:
-    m      : layer-1 positional attention signal   = p_s^T A1 p_{s-1}          (scalar)
-    sigma1 : layer-1 noise level                   = ||A1||_F / sqrt(d)        (scalar)
-    q      : layer-2 induction signal              = tr(A2 @ WV1) / d          (scalar)
-    eta    : layer-2 induction noise               = ||A2 @ WV1||_F^2 / d      (scalar)
-    gamma  : readout alignment                     = tr(U @ WV2^T) / d         (scalar)
-
-All order parameters can be passed as scalars or as batched tensors of shape (T,)
-for vectorised evaluation over a trajectory of T checkpoints.
-"""
 import math
 import torch
 from torch import Tensor
@@ -25,6 +5,30 @@ from typing import Union
 
 # ── type alias ────────────────────────────────────────────────────────────────
 FloatLike = Union[float, Tensor]
+
+
+def effective_loss(ord_params: dict[str, FloatLike], r:int, V:int, K:int, beta:float,return_components:bool=False) -> float:
+    m = ord_params['m']
+    q = ord_params['Q']
+    gamma = ord_params['Gamma']
+
+    rho = K / V
+    
+    h_star = (beta/r**2) * (1/V) * m * q * gamma
+
+    L_trigg = math.log(1+(V-1)*math.exp(-h_star))
+    L_eff = rho*L_trigg + (1-rho)*math.log(V)
+    if return_components:
+        return {
+            "L_eff": L_eff,
+            "L_trigg": L_trigg,
+            "h_star": h_star
+        }
+    return L_eff
+
+
+
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -97,6 +101,8 @@ def pi_theory(L: int, V: int) -> float:
     if L <= 1:
         return 0.0
     return 1.0 - (V / (L - 1)) * (p - p ** L)
+
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════

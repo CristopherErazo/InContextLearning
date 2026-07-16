@@ -42,7 +42,7 @@ class AttentionLayer(nn.Module):
 
         A = self.dropout(A)
         Y = A @ v #(B,L,r) 
-        Y = self.WO(Y)/math.sqrt(2) #(B,L,d)
+        Y = self.WO(Y) #(B,L,d)
         return Y, A, S
 
 
@@ -76,7 +76,7 @@ class MinimalTransformer(nn.Module):
         e , p = self.embed(x)
         X1, _ , _ = self.attn1(p, p, e, mask)
         X2, _ , _ = self.attn2(e, X1, e, mask)
-        logits = self.unembed(X2)*self.beta
+        logits = self.beta*self.unembed(X2)
         return logits
     
     def full_output(self, x, mask, path="full"):
@@ -87,8 +87,26 @@ class MinimalTransformer(nn.Module):
         out['X1'], out['A1'], out['S1'] = X1, A1, S1
         out['X2'], out['A2'], out['S2'] = X2, A2, S2
 
-        out['logits'] = self.unembed(X2)*self.beta
+        out['logits'] = self.beta*self.unembed(X2)
         return out
+    
+    def register_buffers(self,K):
+        """
+        Precompute quantities derived from frozen parameters.
+
+        Args:
+            K (int): Number of trigger tokens in the batch.
+        """
+        with torch.no_grad():
+            E = self.embed.E.weight # shape (V, d)
+            E_trigg = E[:K].mean(dim=0) # shape (d,)
+            E_nontrigg = E[K:].mean(dim=0) # shape (d,)
+            U = self.unembed.U.weight # shape (V, d)
+            U_nontrigg = U[K:].mean(dim=0) # shape (d,)
+        # register only once
+        self.register_buffer("E_trigg", E_trigg)
+        self.register_buffer("E_nontrigg", E_nontrigg)
+        self.register_buffer("U_nontrigg", U_nontrigg)
 
 
 def initialize_model(model,path="full",sigma_0=1.0):

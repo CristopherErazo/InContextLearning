@@ -1,3 +1,4 @@
+from functools import cached_property
 import torch
 import math
 from .utils import on_off_masks
@@ -100,7 +101,7 @@ class EvalContext:
 
 
 class EvalContextLogits:
-    def __init__(self, model, batch, loss_fn, P_b=None, P_u=None):
+    def __init__(self, model, batch, loss_fn):
         device = next(model.parameters()).device
 
         # Ground Variables
@@ -115,24 +116,76 @@ class EvalContextLogits:
         self.only_triggers = (self.input.unsqueeze(-1) == self.trigger_set.unsqueeze(1)).any(-1) & (self.counts >= 2) # shape (B, L)
         self.only_non_triggers = ~( (self.input.unsqueeze(-1) == self.trigger_set.unsqueeze(1)).any(-1) ) # shape (B, L)
         self.all = torch.ones_like(self.input, dtype=torch.bool) # shape (B, L)
-        
+        self.model = model
         self.rank = model.rank
         self.vocab_size = model.vocab_size
         self.seq_len = model.seq_len
+        self.K = len(self.trigger_set_unique)
+        self.rho = self.K / self.vocab_size
+        self.beta = model.beta
+        self.d_model = model.d_model
 
         self.loss_fn = loss_fn  
+        
+        self.E_trigg = model.E_trigg # shape (d,)
+        self.E_nontrigg = model.E_nontrigg # shape (d,)
+        self.U_nontrigg = model.U_nontrigg # shape (d,)
 
-
-
+       
+        # Get the indexes from 0 to batch_size-1 where self.is_trigg[:, -1] & (self.counts[:, -1] >= 2) holds
+        self.sub_indexes = torch.nonzero(self.is_trigg[:, -1] & (self.counts[:, -1] >= 2)).squeeze(-1) # shape (b,)
+        # print(f"sub_indexes shape: {self.sub_indexes.shape}, sub_indexes: {self.sub_indexes}")
+        self.sub_input = self.input[self.sub_indexes] # shape (b, L)
+        self.sub_mask = self.mask[self.sub_indexes] # shape (b, L, L)
+        self.sub_target = self.target[self.sub_indexes][:,-1] # shape (b,)
+        
         with torch.no_grad():
-            self.logits = model(self.input, self.mask) # shape (B, L, V)
+            self.U = model.unembed.U.weight # shape (V, d)
+            self.E = model.embed.E.weight # shape (V, d)
+            self.logits = model(self.input, self.mask)  # shape (B, L, V)
+
+            self.sub_e = model.embed.E(self.sub_input) # shape (b, L, d)
+            self.sub_u = self.U[self.sub_target] # shape (b, d)
+            self.sub_eL = self.sub_e[:, -1, :] # shape (b, d)
+            
 
         # Masks for on-target and off-target logits
-        # generate a mask to apply to the logits (shape(B,L,V)) such that each element (b,l,v) is true
-        # it the input token at position l in batch b is a trigger and the counts for that trigger are larger than 1
-        # and the corresponding output token is v. This mask will be used to compute the on-target and off-target logits for each trigger token in the batch.
         self.on_target_mask , self.off_target_mask, _ = on_off_masks(self.logits.shape, batch, device=device)
 
+    @cached_property
+    def W1(self):
+        with torch.no_grad():
+            WQ = self.model.attn1.WQ.weight # shape (r, d)
+            WK = self.model.attn1.WK.weight # shape (r, d)
+            return WQ.t() @ WK # shape (d, d)
+
+    @cached_property
+    def M(self): 
+        """M = P @ WQK1 @ P.T (L, L)"""
+        with torch.no_grad():
+            P = self.model.embed.P.weight # shape (L, d)
+            WQ = self.model.attn1.WQ.weight # shape (r, d)
+            WK = self.model.attn1.WK.weight # shape (r, d)
+            return torch.linalg.multi_dot([P, WQ.t(), WK, P.t()]) # shape (L, L)
+        
+    @cached_property
+    def W2(self): # W2 = WQK2@WOV1
+        """W2 = WQK2@WOV1 (d, d)"""
+        with torch.no_grad():
+            WQ = self.model.attn2.WQ.weight # shape (r, d)
+            WK = self.model.attn2.WK.weight # shape (r, d)
+            WV = self.model.attn1.WV.weight # shape (r, d)
+            WO = self.model.attn1.WO.weight # shape (d, r)
+            return torch.linalg.multi_dot([WQ.t(), WK, WO, WV]) # shape (d, d)
+    
+    @cached_property
+    def W3(self): # W3 = WOV2
+        """W3 = WOV2 (d, d)"""
+        with torch.no_grad():
+            WV = self.model.attn2.WV.weight # shape (r, d)
+            WO = self.model.attn2.WO.weight # shape (d, r)
+            return WO @ WV # shape (d, d)
+        
 class IC_TopKAccuracy:
     def __init__(self, k):
         self.k = k
@@ -231,9 +284,147 @@ class OnOffLogitsMetric:
         else:
             raise ValueError(f"Unknown type {self.type} for OnOffLogitsMetric")
         
+class EmpiricalLogits:
+    def __init__(self):
+        self.name = 'on_target_emp'
+    def __call__(self, ctx):
+        m = ctx.M # shape (L, L)
+        w2 = ctx.W2 # shape (d, d)
+        w3 = ctx.W3 # shape (d, d) 
+        sub_e = ctx.sub_e # shape (b, L, d)
+        sub_u = ctx.sub_u # shape (b, d)
+        sub_eL = ctx.sub_eL # shape (b, d)
+        # Compute the empirical logits for the last position in the sub-batch
+        q_term = sub_eL @ w2 # shape (b, d)
+        q_term = (q_term[:, None, :] * sub_e).sum(dim=-1) # shape (b, L)
 
+        g_term = sub_u @ w3 # shape (b, d)
+        g_term = (g_term[:, None, :] * sub_e).sum(dim=-1) # shape (b, L)
+
+        # Group 
+        emp_log = m[None,:,:] * q_term[:,None,:] * g_term[:,:,None] # shape (b, L, L)
+
+        mask = ctx.sub_mask # shape (b, L, L)
+        b = mask.shape[0]
+        emp_log_masked = emp_log[mask] # shape (num_masked_positions,)
+        return ctx.beta*emp_log_masked.sum().item()/ ( b * ctx.rank**2)
 # Order Parameters
 
+class Q_Metric:
+    def __init__(self):
+        self.name = 'q'
+    def __call__(self, ctx):
+        w2 = ctx.W2 # shape (d, d)
+        e_trigg = ctx.E_trigg # shape (d,)
+        e_nontrigg = ctx.E_nontrigg # shape (d,)
+        return (e_trigg.T @ w2 @ e_nontrigg).item()
+
+class Gamma_Metric:
+    def __init__(self):
+        self.name = 'gamma'
+    def __call__(self, ctx):
+        w3 = ctx.W3 # shape (d, d)
+        u_nontrigg = ctx.U_nontrigg # shape (d,)
+        e_nontrigg = ctx.E_nontrigg # shape (d,)
+        return (e_nontrigg.T @ w3.T @ u_nontrigg).item()
+
+class M_Metric:
+    def __init__(self):
+        self.name = 'm'
+    def __call__(self, ctx):
+        m = ctx.M # shape (L, L)
+        # Extract the sub-diagonal elements of m (i.e., m[i, i-1] for i=1,...,L-1)
+        elements_sub_diag = torch.diagonal(m, offset=-1) # shape (L-1,)
+        # mask = ctx.mask[0] # shape (L, L)
+        return elements_sub_diag.sum().item()
+        # L = m.shape[0]
+class Q_capital_Metric:
+    def __init__(self):
+        self.name = 'Q'
+    def __call__(self, ctx):
+        w2 = ctx.W2 # shape (d, d)
+        K = ctx.K
+        E_T = ctx.E[:K] # shape (K, d)
+        eW = E_T @ w2 # shape (K, d)
+        return (eW * E_T).sum().item() / K
+
+class Gamma_capital_Metric:
+    def __init__(self):
+        self.name = 'Gamma'
+    def __call__(self, ctx):
+        w3 = ctx.W3 # shape (d, d)
+        V = ctx.vocab_size
+        K = ctx.K
+        E_Tbar = ctx.E[K:] # shape (V-K, d)
+        U_Tbar = ctx.U[K:] # shape (V-K, d)
+        eW = E_Tbar @ w3.T # shape (V-K, d)
+        return (eW * U_Tbar).sum().item() / (V - K)
+
+class Var_Metric_Off:
+    def __init__(self):
+        self.name = 'var_off'
+    def __call__(self, ctx):
+        # w1 = ctx.W1 # shape (d, d)
+        w2 = ctx.W2 # shape (d, d)
+        w3 = ctx.W3 # shape (d, d)
+        # norm1 = torch.norm(w1, p='fro')**2
+        norm2 = torch.norm(w2, p='fro')**2
+        norm3 = torch.norm(w3, p='fro')**2
+        m = ctx.M # shape (L, L)
+        # mask = ctx.mask[0] # shape (L, L)
+        # Extract the sub-diagonal elements of m (i.e., m[i, i-1] for i=1,...,L-1)
+        elements_sub_diag = torch.diagonal(m, offset=-1)**2 # shape (L-1,)
+        norm1= (elements_sub_diag**2).sum( )
+        const = ctx.beta**2* ctx.rho/(ctx.vocab_size**2*ctx.rank**4)
+        return (const*norm1*norm2*norm3).item()
+
+class Var_Metric_On:
+    def __init__(self):
+        self.name = 'var_on'
+    def __call__(self, ctx):
+        m = ctx.M # shape (L, L)
+        # Extract the sub-diagonal elements of m (i.e., m[i, i-1] for i=1,...,L-1)
+        elements_sub_diag = torch.diagonal(m, offset=-1)**2 # shape (L-1,)
+        norm1= (elements_sub_diag**2).sum( )
+
+        w2 = ctx.W2 # shape (d, d)
+        K = ctx.K
+        E_T = ctx.E[:K] # shape (K, d)
+        eW = E_T @ w2 # shape (K, d)
+        norm2 =  ((eW * E_T)**2).sum().item() / K
+
+        w3 = ctx.W3 # shape (d, d)
+        V = ctx.vocab_size
+        K = ctx.K
+        E_Tbar = ctx.E[K:] # shape (V-K, d)
+        U_Tbar = ctx.U[K:] # shape (V-K, d)
+        eW = E_Tbar @ w3.T # shape (V-K, d)
+        norm3 = ((eW * U_Tbar)**2).sum().item() / (V - K)
+
+        const = ctx.beta**2/(ctx.vocab_size**2*ctx.rank**4)
+        return (const*norm1*norm2*norm3).item()
+
+
+
+
+
+
+        # # create row and column indices
+        # i = torch.arange(L, device=m.device)[:, None]
+        # j = torch.arange(L, device=m.device)[None, :]
+
+        # # condition j <= i-2
+        # mask = j <= i - 2
+
+        # # row weights: (L-i-2)
+        # weights = (L - i - 2).clamp(min=0)
+
+        # av_m = (m * mask * weights).sum() / (L - 1)
+        # return av_m.item() 
+
+
+
+# ----- Previously defined metrics for order parameters -----
 class OrderParameterMetric:
     def __init__(self, 
                  name = 'q', 
@@ -352,17 +543,17 @@ class Eta2:
         return eta.item()/math.sqrt(4*ctx.rank)
         # return eta.item() * math.sqrt(ctx.d_model)/16
     
-class Gamma:
-    def __init__(self):
-        self.name = 'gamma'
-    def __call__(self, ctx):
-        # ── gamma : average u_t^T WOV2 e_t over t in vocabulary ─────────────────
-        WOV2 = ctx.WOV2 
-        U = ctx.U # shape (V, d)
-        E = ctx.E # shape (V, d)
-        gamma_vals = (U @ WOV2 * E).sum(dim=-1) # shape (V,)
-        gamma = gamma_vals.mean()
-        return gamma.item()#/U.size(1) # normalize by d
+# class Gamma:
+#     def __init__(self):
+#         self.name = 'gamma'
+#     def __call__(self, ctx):
+#         # ── gamma : average u_t^T WOV2 e_t over t in vocabulary ─────────────────
+#         WOV2 = ctx.WOV2 
+#         U = ctx.U # shape (V, d)
+#         E = ctx.E # shape (V, d)
+#         gamma_vals = (U @ WOV2 * E).sum(dim=-1) # shape (V,)
+#         gamma = gamma_vals.mean()
+#         return gamma.item()#/U.size(1) # normalize by d
 
 class Eta_Gamma:
     def __init__(self):
