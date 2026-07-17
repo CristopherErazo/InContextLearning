@@ -1,7 +1,7 @@
 import torch
 
 
-def get_attention_patterns(model, sub_batch, path, device):
+def get_activations(model, sub_batch, path, device):
     """ 
     Get the attention patterns of the model on the sub_batch of size n_test. This function is used for evaluation during training.    
     """
@@ -13,10 +13,8 @@ def get_attention_patterns(model, sub_batch, path, device):
         output = model.full_output(input,mask, path = path)
         attn1 = output.get('A1', None) # shape (n_test, seq_len, seq_len)
         attn2 = output.get('A2', None) # shape (n_test, seq_len, seq_len)
-        scores1 = output.get('S1', None) # shape (n_test, seq_len, seq_len)
-        scores2 = output.get('S2', None) # shape (n_test, seq_len, seq_len)
         logits = output.get('logits', None) # shape (n_test, seq_len, vocab_size)
-    return {'attn1': attn1, 'attn2': attn2, 'scores1': scores1, 'scores2': scores2, 'logits': logits}
+    return {'attn1': attn1, 'attn2': attn2, 'logits': logits}
     
 
 def get_logits(model, sub_batch, path, device):

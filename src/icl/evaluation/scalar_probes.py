@@ -1,7 +1,7 @@
 from functools import cached_property
 import torch
 import math
-from .utils import on_off_masks
+from .utils import on_off_logit_masks
 
 def compute_kl(P, Q):
     "P and Q are distributions over the same support, shape (..., vocab_size) = (B,L,V) usually"
@@ -150,7 +150,7 @@ class EvalContextLogits:
             
 
         # Masks for on-target and off-target logits
-        self.on_target_mask , self.off_target_mask, _ = on_off_masks(self.logits.shape, batch, device=device)
+        self.on_target_mask , self.off_target_mask, _ = on_off_logit_masks( batch,self.vocab_size, device=device)
 
     @cached_property
     def W1(self):
