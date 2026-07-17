@@ -1,7 +1,7 @@
 from shiny import App 
 
-from ui import app_ui
-from server import server 
+from ICL.dashboards.evolution.ui import app_ui
+from ICL.dashboards.evolution.server import server 
 
 
 # -----------------------------

@@ -10,20 +10,19 @@ from tracklab import ExperimentTracker
 from icl.models.minimal_model import MinimalTransformer, initialize_model
 from icl.evaluation.training import get_optimizer, evaluate_model
 from icl.data.trigg_data import generate_icl_task_batch 
-from icl.evaluation.utils import get_sub_batch, get_evaluation_times
+from icl.evaluation.utils import get_best_sub_batch, get_evaluation_times
 from icl.evaluation.scalar_probes import OnOffLogitsMetric, LossMetric, IC_TopKAccuracy, EvaluatorLogits, M_Metric, Q_Metric, Gamma_Metric, Gamma_capital_Metric, Q_capital_Metric, EmpiricalLogits, Var_Metric_On, Var_Metric_Off
-from icl.evaluation.tensor_probes import get_logits
+from icl.evaluation.tensor_probes import get_logits , get_activations
 from icl.evaluation.theory import effective_loss
-
-
+from icl.evaluation.utils import get_on_off_masks , get_indices
 
 
 @dataclass
 class ModelArgs:
-    vocab_size: int = 50  # Vocabulary size
-    seq_len: int = 40 # Sequence length
-    d_model: int = 1000 # Model dimension
-    rank: int = 25   # rank or matrices
+    vocab_size: int = 110  # Vocabulary size
+    d_model: int = 1024 # Model dimension
+    seq_len: int = 32 # Sequence length
+    rank: int = 50     # rank or matrices
     dropout: float = 0.0 # Dropout rate
     lin_attn: bool = True # Whether to use linear attention or not
     beta: float = 0.5 # Scaling factor for the output logits (inverse of the temperature)
@@ -31,23 +30,24 @@ class ModelArgs:
 @dataclass
 class DataArgs:
     batch_size: int = 1024 # Batch size for training
-    test_size: int = 500 # Number of samples in the test set
-    K : int = 4 # Number of trigger tokens  
+    test_size: int = 1024 # Number of samples in the test set
+    K : int = 8 # Number of trigger tokens  
 
 @dataclass
 class OptimArgs:
-    lr: float = 0.6
+    lr: float = 0.25
     opt: str = "sgd"
     momentum: float = 0.9
     weight_decay: float = 0.0
 
 @dataclass 
 class ExtraArgs:
-    total_steps: int = 400 # Number of training steps
+    total_steps: int = 5000 # Number of training steps
     n_prints: int = 50 # Number of times to print during training.
-    n_prints_model: int = 20 # Number of times to save model checkpoints during training.
+    n_prints_model: int = 10 # Number of times to save model checkpoints during training.
     print_scale: str = 'linear' # Scale for printing steps: log or linear
     experiment_name: str = 'logits' # Name of the experiment for saving results
+    comments: str = '' # Additional comments for the experiment
     
 @dataclass
 class TrainerArgs:
@@ -115,7 +115,17 @@ def main():
                                          seq_len,
                                          K)
                                         #   device=device)
-    sub_batch = get_sub_batch(test_batch,device = device, n_test=100)
+    
+    # Get indices of the batch where is_trigg == 1 and counts > 1 (where induction can happen)
+    idx_ind, perm = get_indices(test_batch,vocab_size,device=device) # shape (num_indices, 2)
+    n_ind = idx_ind.shape[0]
+    logger.info(f"Number of indices where induction can happen: {n_ind} out of {test_size*seq_len} total indices in the test batch.")
+    logger.info(f"Percentage of indices where induction can happen: {n_ind/(test_size*seq_len)*100:.2f}%")
+
+
+    # Get on/off target masks for the test batch and best sub-batch for evaluation/plotting
+    on_off_masks = get_on_off_masks(test_batch, vocab_size, device=device)                              
+    best_idx , sub_batch = get_best_sub_batch(test_batch, device = device, n_test=5)
     run.track_artifact(sub_batch, name="sub_batch", type="pickle")
 
     # Define metrics for evaluation
@@ -169,12 +179,52 @@ def main():
             res.update(theory)
 
             run.track_metric(step, **res)
-            logger.info(f"step {step}/{total_steps} \t loss = {res['loss']:.4f} \t  acc = {res['top1_accuracy']:.4f} \t L_eff = {res['L_eff']:.4f} ")
+            logger.info(f"step {step}/{total_steps} | loss = {res['loss']:.4f} |  acc = {res['top1_accuracy']:.4f} ")
             
         # Evaluations and logging of attention patterns
         if step in print_steps_model:
-            logits = get_logits(model, sub_batch, 'full', device).cpu().numpy() # shape (n_test, seq_len, vocab_size)
-            run.track_artifact(logits, step, name=f"logits",type="tensor")
+            activations = get_activations(model, test_batch, 'full', device) #{'attn1': attn1, 'attn2': attn2, 'logits': logits}
+            for act_name, act in activations.items():
+                masks = on_off_masks[act_name]
+                vmin , vmax = act.min().item(), act.max().item()
+                histograms = {}
+                for i , mask_name in enumerate(['on','off','all']):
+                    masked_act = act[masks[mask_name]]
+                    bins, edges = np.histogram(masked_act.cpu().numpy(), bins=35, range=(vmin,vmax), density=True)
+                    histograms[mask_name] = bins
+                histograms['edges'] = edges
+                run.track_artifact(histograms, step, name=f"{act_name}_histograms",type="pickle")
+                
+                run.track_artifact(act[best_idx].cpu().numpy(), step, name=f"{act_name}_matrix",type="tensor")
+            
+
+
+            logits = activations['logits']
+            logits_ind = logits[idx_ind[:,0], idx_ind[:,1],:] # shape (num_indices, vocab_size)
+            permuted_logits = logits_ind.gather(1, perm) # shape (num_indices, vocab_size)
+            run.track_artifact(permuted_logits.cpu().numpy(), step, name=f"logits_ind",type="tensor")
+
+            # # Compute effective variable moments
+            # h_star = permuted_logits[:,-1] # shape (num_indices,)
+            # logS = torch.logsumexp(permuted_logits[:,:-1], dim=1) # shape (num_indices,)
+
+            # h_star_mean = h_star.mean().item()
+            # logS_mean = logS.mean().item()
+            # h_star_std = h_star.std().item()
+            # logS_std = logS.std().item()
+            
+            # h_star_logS_corr = (h_star - h_star_mean)*(logS - logS_mean) # shape (num_indices,)
+            # h_star_logS_corr = h_star_logS_corr.mean().item()
+
+
+            # run.track_metric(step, h_star_mean = h_star_mean,
+            #                         logS_mean = logS_mean,
+            #                         h_star_std = h_star_std,
+            #                         logS_std = logS_std,
+            #                         h_star_logS_corr = h_star_logS_corr)            
+            
+
+            
 
         batch = generate_icl_task_batch(batch_size,
                                         vocab_size,
@@ -186,6 +236,8 @@ def main():
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
+        
 
     t1 = time.time()
     run.finalize()
