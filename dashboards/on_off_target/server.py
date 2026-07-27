@@ -132,7 +132,7 @@ def server(input, output, session):
         matrices = [reader.load_artifact(run_id, file) for file in list_variable['file']]
 
         list_variable = list_artifacts[list_artifacts['file'].str.contains('logits_ind')]
-        log_ind = [reader.load_artifact(run_id, file) for file in list_variable['file']]
+        log_ind = np.array([reader.load_artifact(run_id, file) for file in list_variable['file']])
         return hists, matrices, log_ind 
     
       
@@ -224,6 +224,13 @@ def server(input, output, session):
         edges = hist_data['edges']
         dx = np.diff(edges)
         
+        # Total logits ind stats
+        h_star_time = log_ind[:,:,-1] # shape (num_steps, num_indices)
+        logS_time = np.log(np.sum(np.exp(log_ind[:,:,:-1]),axis=-1)) # shape (num_steps, num_indices)
+        var_h_star = np.var(h_star_time,axis=-1) # shape (num_steps,)
+        var_logS = np.var(logS_time,axis=-1) # shape (num_steps,)
+        cov_h_star_logS = np.mean((h_star_time - np.mean(h_star_time,axis=-1,keepdims=True))*(logS_time - np.mean(logS_time,axis=-1,keepdims=True)),axis=-1) # shape (num_steps,)
+
         # Get logits stats data
         time, data = _get_plot_data()
         matrix_step = _get_matrix_step_frac()*data['step'].max()
@@ -233,7 +240,8 @@ def server(input, output, session):
         s_star = data['on_target_std'][time_idx]
         s = data['off_target_std'][time_idx]
 
-        # Get logits_ind data
+        # Get logits_ind 
+        print(f'{log_ind.shape=}')
         logits_ind = log_ind[matrix_step_idx] # shape (num_indices, vocab_size)
         S = np.log(np.sum(np.exp(logits_ind[:,:-1]),axis=-1)) # shape (num_indices,)
         h_star = logits_ind[:,-1]
@@ -249,7 +257,7 @@ def server(input, output, session):
         x_vals = np.linspace(edges.max(),edges.min(),200)
 
         # Create the figure and axes for the plots
-        fig , axes = create_fig(ncols=3,nrows=1,layout='tight',sharex=False)
+        fig , axes = create_fig(ncols=4,nrows=1,layout='tight',sharex=False)
 
         ax = axes[0]
         im = ax.imshow(matrix_data, aspect='auto', cmap='viridis',vmin=vmin,vmax=vmax)
@@ -278,6 +286,13 @@ def server(input, output, session):
         ax.scatter(S,h_star,alpha=0.2,marker='.')
         ax.set_xlabel(r"$\log S = \log \sum_{i=1}^{V-1} e^{h_i}$",fontsize=8)
         ax.set_ylabel(r"$h^*$",fontsize=9)
+
+        ax = axes[3]
+        ax.plot(var_h_star, label=r"$\sigma^2(h^*)$")
+        ax.plot(var_logS, label=r"$\sigma^2(\log S)$")
+        ax.plot(cov_h_star_logS, label=r"$\sigma(h^*,\log S)$")
+        ax.set_xlabel('Step',fontsize=5)
+        ax.legend(frameon=False,fontsize=5)
 
         return fig
     

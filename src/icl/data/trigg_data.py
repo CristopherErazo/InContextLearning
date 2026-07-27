@@ -42,7 +42,13 @@ def generate_icl_task_batch(num_samples: int,
 
     # ---- initialize sequence ----
     sequence = torch.zeros(B, L+1, dtype=torch.long, device=device)
-    sequence[:, 0] = torch.randint(0, V, (B,), device=device)
+    # I want to sample the initial sequence from the stationary distribution of each 
+    # sequence which has twice probability of being an OUTPUT token than any other token. 
+    # But we need to consider that the outputs at each position are different for each sequence, so we need to sample from a different distribution for each sequence.
+    prob_dist = torch.ones(B, V, device=device)
+    prob_dist[mapping != -1] = 2
+    prob_dist /= prob_dist.sum(dim=1, keepdim=True)
+    sequence[:, 0] = torch.multinomial(prob_dist, 1).squeeze(1)
 
     # ---- outputs ----
     is_trigg = torch.zeros(B, L+1, dtype=torch.long, device=device)

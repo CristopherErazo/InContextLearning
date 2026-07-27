@@ -14,15 +14,15 @@ from icl.evaluation.utils import get_best_sub_batch, get_evaluation_times
 from icl.evaluation.scalar_probes import OnOffLogitsMetric, LossMetric, IC_TopKAccuracy, EvaluatorLogits, M_Metric, Q_Metric, Gamma_Metric, Gamma_capital_Metric, Q_capital_Metric, EmpiricalLogits, Var_Metric_On, Var_Metric_Off
 from icl.evaluation.tensor_probes import get_logits , get_activations
 from icl.evaluation.theory import effective_loss
-from icl.evaluation.utils import get_on_off_masks , get_indices
+from icl.evaluation.utils import get_on_off_masks , get_indices, filter_batch
 
 
 @dataclass
 class ModelArgs:
-    vocab_size: int = 110  # Vocabulary size
-    d_model: int = 1024 # Model dimension
-    seq_len: int = 32 # Sequence length
-    rank: int = 50     # rank or matrices
+    vocab_size: int = 256  # Vocabulary size
+    d_model: int = 256 # Model dimension
+    seq_len: int = 128 # Sequence length
+    rank: int = 128     # rank or matrices
     dropout: float = 0.0 # Dropout rate
     lin_attn: bool = True # Whether to use linear attention or not
     beta: float = 0.5 # Scaling factor for the output logits (inverse of the temperature)
@@ -30,8 +30,8 @@ class ModelArgs:
 @dataclass
 class DataArgs:
     batch_size: int = 1024 # Batch size for training
-    test_size: int = 1024 # Number of samples in the test set
-    K : int = 8 # Number of trigger tokens  
+    test_size: int = 2048 # Number of samples in the test set
+    K : int = 32 # Number of trigger tokens  
 
 @dataclass
 class OptimArgs:
@@ -115,12 +115,16 @@ def main():
                                          seq_len,
                                          K)
                                         #   device=device)
+
+    test_batch , filtered_test_size = filter_batch(test_batch, device)
+    logger.info(f"Filtered test batch size: {filtered_test_size} out of {test_size} total sequences in the test batch.")
+    logger.info(f"Percentage of sequences kept after filtering: {filtered_test_size/test_size*100:.2f}%")                                            
     
     # Get indices of the batch where is_trigg == 1 and counts > 1 (where induction can happen)
     idx_ind, perm = get_indices(test_batch,vocab_size,device=device) # shape (num_indices, 2)
     n_ind = idx_ind.shape[0]
-    logger.info(f"Number of indices where induction can happen: {n_ind} out of {test_size*seq_len} total indices in the test batch.")
-    logger.info(f"Percentage of indices where induction can happen: {n_ind/(test_size*seq_len)*100:.2f}%")
+    logger.info(f"Number of indices where induction can happen: {n_ind} out of {filtered_test_size*seq_len} total indices in the test batch.")
+    logger.info(f"Percentage of indices where induction can happen: {n_ind/(filtered_test_size*seq_len)*100:.2f}%")
 
 
     # Get on/off target masks for the test batch and best sub-batch for evaluation/plotting

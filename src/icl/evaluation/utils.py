@@ -2,6 +2,62 @@ import torch
 import math
 import numpy as np
 
+
+def filter_batch(test_batch, device='cpu'):
+    """
+    Filter the batch to remove sequences that have non-trigger tokens with counts > 1 
+    (i.e. keeping only sequences that have no trigger tokens with counts > 1 
+    or sequences that have no trigger tokens at all).
+    This is done to ensure that the evaluation is done on sequences where induction is possible. 
+    The function returns the filtered batch and the fraction of sequences kept.
+    """
+
+    is_trigg = test_batch['is_trigg'].to(device) # shape (batch_size, seq_len)
+    counts = test_batch['counts'].to(device) # shape (batch_size, seq_len)
+    scores = (is_trigg * counts) # shape (batch_size, seq_len)
+    max_score = scores.max(dim=-1).values # shape (batch_size,)
+
+    # Keep sequences that have score > 1 
+    # meaning: removing sequences that have non-trigger tokens at all
+    # or sequences that have only trigger tokens with counts = 1
+    keep_indices = (max_score > 1) # shape (batch_size,)
+    filtered_batch = {k: v.to(device)[keep_indices] for k, v in test_batch.items()}
+    sequences_kept = keep_indices.sum().item()
+    
+    return filtered_batch, sequences_kept/test_batch['sequence'].shape[0]
+
+
+def preprocess_batch(test_batch, device='cpu'):
+
+    test_batch , frac_kept = filter_batch(test_batch, device=device)
+
+    sequence = test_batch['sequence'].to(device) # shape (B, L+1)
+    target = sequence[:, 1:] # shape (B, L)
+    is_trigg = test_batch['is_trigg'].to(device) # shape (B, L)
+    counts = test_batch['counts'].to(device) # shape (B, L)        
+    # First filter batch to remove sequences that have non-trigger tokens with counts > 1 (i.e. keeping only sequences that have no trigger tokens with counts > 1 or sequences that have no trigger tokens at all)
+
+
+    # Masks for positions where induction is possible (is_trigg == 1 and counts > 1) and not possible
+    ind_possible = (is_trigg == 1) & (counts > 1) # shape (B, L)
+    ind_not_possible = ~ind_possible # shape (B, L)
+    # Compute fraction of positions where induction is possible
+    frac_ind_possible = ind_possible.float().mean().item()
+
+    # Evaluate target at only trigger positions
+    target_ind_positions = target[ind_possible]  # shape (num_masked_positions,)
+
+    test_batch['ind_possible'] = ind_possible
+    test_batch['ind_not_possible'] = ind_not_possible
+    test_batch['target_ind_positions'] = target_ind_positions
+
+    # Move all tensors to the specified device
+    test_batch = {k: v.to(device) for k, v in test_batch.items()}
+    return test_batch, frac_ind_possible, frac_kept
+
+
+    
+
 def compute_entropies_and_dkl(P_b:torch.Tensor,P_u:torch.Tensor):
     """ 
     Compute KL divergences between P_b and uniform distribution, P_u and uniform distribution, as well as the entropies of P_b and P_u.
@@ -74,20 +130,11 @@ def get_sub_batch(test_batch, device, n_test = 5):
     """ 
     Get a sub-batch of the given batch of size n_test. 
     """
-    sequence = test_batch['sequence'][:n_test].to(device) # shape (n_test, seq_len + 1)
-    trigger_set = test_batch['trigger_set'][:n_test].to(device) # shape (n_test, K)
-    output_set = test_batch['output_set'][:n_test].to(device) # shape (n_test, K)
-    counts = test_batch['counts'][:n_test].to(device) # shape (n_test, seq_len)
-    is_trigg = test_batch['is_trigg'][:n_test].to(device) # shape (n_test, seq_len)
-    mask = test_batch['mask'][:n_test].to(device) # shape (n_test, seq_len, seq_len)
-    return {
-        "sequence": sequence, # shape (n_test, seq_len + 1)
-        "trigger_set": trigger_set, # shape (n_test, K)
-        "output_set": output_set, # shape (n_test, K)
-        "counts": counts,    # shape (n_test, seq_len)
-        "is_trigg": is_trigg, # shape (n_test, seq_len)
-        "mask": mask # shape (n_test, seq_len, seq_len)
-    }
+
+    sub_batch = {k: v[:n_test].to(device) for k, v in test_batch.items()}
+    return sub_batch
+
+
 
 def get_best_sub_batch(test_batch, device, n_test = 5):
     """ 
@@ -100,20 +147,11 @@ def get_best_sub_batch(test_batch, device, n_test = 5):
     counts = test_batch['counts'].to(device) # shape (batch_size, seq_len)
     scores = (is_trigg * counts).sum(dim=-1) # shape (batch_size,)
     best_indices = torch.topk(scores, n_test).indices # shape (n_test,)
-    sequence = test_batch['sequence'].to(device)[best_indices] # shape (n_test, seq_len + 1)
-    trigger_set = test_batch['trigger_set'].to(device)[best_indices] # shape (n_test, K)
-    output_set = test_batch['output_set'].to(device)[best_indices] # shape (n_test, K)
-    counts = test_batch['counts'].to(device)[best_indices] # shape (n_test, seq_len)
-    is_trigg = test_batch['is_trigg'].to(device)[best_indices] # shape (n_test, seq_len)
-    mask = test_batch['mask'].to(device)[best_indices]# shape (n_test, seq_len, seq_len)
-    return best_indices, {
-        "sequence": sequence, # shape (n_test, seq_len + 1)
-        "trigger_set": trigger_set, # shape (n_test, K)
-        "output_set": output_set, # shape (n_test, K)
-        "counts": counts,    # shape (n_test, seq_len)
-        "is_trigg": is_trigg, # shape (n_test, seq_len)
-        "mask": mask # shape (n_test, seq_len, seq_len)
-    }
+
+    sub_batch = {k: v[best_indices] for k, v in test_batch.items()}
+    return best_indices, sub_batch
+
+
 
 
 def get_indices(test_batch,vocab_size,device):
@@ -236,7 +274,14 @@ def get_on_off_masks(batch,vocab_size,device='cpu'):
     
 
 
-def get_evaluation_times(print_scale, total_steps, nprints, nprints_model):
+def get_evaluation_times(args):
+    """
+    Get the evaluation times based on the configuration in args.
+    """
+    print_scale = args.print_scale
+    total_steps = args.total_steps
+    nprints = args.n_prints
+    nprints_model = args.n_prints_model
     if print_scale == 'log':
         print_total_steps = np.unique(np.logspace(-0.01, np.log10(total_steps-1), num=nprints).astype(int))
         print_total_steps_model = np.unique(np.logspace(-0.01, np.log10(total_steps-1), num=nprints_model).astype(int))
