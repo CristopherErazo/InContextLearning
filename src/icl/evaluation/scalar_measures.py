@@ -25,9 +25,6 @@ class Evaluator:
         return results
     
 
-
-
-
 class EvalContext:
     def __init__(self, model, batch, loss_fn):
         device = next(model.parameters()).device

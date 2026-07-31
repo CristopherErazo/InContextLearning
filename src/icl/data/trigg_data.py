@@ -1,6 +1,6 @@
 import torch
 
-def generate_icl_task_batch(num_samples: int,
+def generate_icl_batch(num_samples: int,
                             V: int,
                             L: int,
                             K: int,

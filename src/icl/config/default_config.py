@@ -51,6 +51,10 @@ class ExtraArgs:
 
 @dataclass
 class TrainerArgs:
+    """
+    TrainerArgs is a dataclass that encapsulates all the configuration parameters required for training a model.
+    It includes model-specific arguments, data handling parameters, optimization settings, and additional configurations.
+    """
     model_args: ModelArgs = field(default_factory=ModelArgs)
     data_args: DataArgs = field(default_factory=DataArgs)
     optim_args: OptimArgs = field(default_factory=OptimArgs)
