@@ -6,6 +6,11 @@ from .utils import on_off_logit_masks
 
 
 class Evaluator:
+    """
+    Evaluator class to evaluate a model on a given batch using specified metrics.
+    Parameters:
+        - metrics: A list of metric instances to evaluate the model. Each metric should be callable and accept an EvalContext.
+    """
     def __init__(self, metrics):
         self.metrics = metrics
 
@@ -26,6 +31,14 @@ class Evaluator:
     
 
 class EvalContext:
+    """
+    Evaluation context that holds the model, batch, and computed logits.
+    Parameters:
+    - model: The model to evaluate.
+    - batch: The input batch for evaluation.
+    - loss_fn: The loss function to compute the loss.
+    Provides properties to access the logits, targets, and masks for evaluation.
+    """
     def __init__(self, model, batch, loss_fn):
         device = next(model.parameters()).device
 

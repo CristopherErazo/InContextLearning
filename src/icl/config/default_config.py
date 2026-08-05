@@ -38,15 +38,18 @@ class OptimArgs:
 
 @dataclass
 class ExtraArgs:
-    alpha_steps: float = 6.0  # Sample complexity = total_steps / V
+    alpha_steps: float = 2.0  # Sample complexity = total_steps / V
     n_prints: int = 50  # Metric evaluation frequency
     n_prints_model: int = 10  # Model checkpoint frequency
     print_scale: str = 'linear'  # Scale for evaluation: log or linear
-    experiment_name: str = 'comunication'  # Experiment tracking name
+    experiment_name: str = 'control_test'  # Experiment tracking name
     comments: str = ''  # Additional run comments
     seed: int | None = None      # Random seed
+    enable_control: bool = True  # Enable control features
+    enable_rewind: bool = False  # Enable rewind features
     # Computed Values
     total_steps: int = 0  # Total training steps
+    
 
 
 @dataclass

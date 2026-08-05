@@ -64,6 +64,12 @@ class UnembeddingModule(nn.Module):
 
 
 class MinimalTransformer(nn.Module):
+  """
+  A minimal transformer with two full-rank attention layers and embedding/unembedding modules.
+  The attention layers are parameterized by full-rank matrices, 
+  and the model supports both next-token prediction and last-token prediction modes 
+  using a 'pred_mode' argument. The model also includes methods for initializing parameters and registering buffers for precomputed quantities.
+  """
 
   def __init__(self, args):
     super().__init__()
