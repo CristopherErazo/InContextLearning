@@ -44,9 +44,9 @@ class OptimArgs:
 
 @dataclass
 class ExtraArgs:
-    alpha_steps: float = field(default=2.0,**ui_metadata)  # Sample complexity = total_steps / V
+    alpha_steps: float = field(default=1.0,**ui_metadata)  # Sample complexity = total_steps / V
     n_prints: int = 50  # Metric evaluation frequency
-    n_prints_model: int = 10  # Model checkpoint frequency
+    n_prints_model: int = 2  # Model checkpoint frequency
     print_scale: str = 'linear'  # Scale for evaluation: log or linear
     experiment_name: str | None  = None # Experiment tracking name
     comments: str = ''  # Additional run comments

@@ -21,5 +21,6 @@ app = build_dashboard(
         base_dir="./data",
         config_cls=TrainerArgs,
         entrypoint="icl.runtime.launcher",
+        poll_interval_s=1.0
     )
 )
