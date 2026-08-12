@@ -10,3 +10,4 @@ data/
 plots/
 # Allow src/icl/data
 !src/icl/data/
+_data/
