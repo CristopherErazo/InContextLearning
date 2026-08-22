@@ -1,6 +1,8 @@
 from functools import cached_property
 import torch
 import math
+
+from .logit_expectation import expected_ontarget_logit
 from .utils import on_off_logit_masks
 
 
@@ -25,7 +27,7 @@ class Evaluator:
             if isinstance(out, dict):
                 results.update(out)
             else:
-                results[metric.name] = metric(ctx)
+                results[metric.name] = out
 
         return results
     
@@ -47,6 +49,7 @@ class EvalContext:
         input = sequence[:, :-1] # shape (B, L)
         self.target = sequence[:, 1:] # shape (B, L)
         mask = batch['mask'].to(device) # shape (B, L, L)
+        self.trigger_set = batch['trigger_set'][0].to(device) # shape (K,)
         # masks for positions where induction is possible and not possible
         self.ind_possible = batch['ind_possible'].to(device) # shape (B, L)
         self.ind_not_possible = batch['ind_not_possible'].to(device) # shape (B, L)
@@ -54,7 +57,9 @@ class EvalContext:
         self.ind_target = batch['target_ind_positions'].to(device) # shape (num_masked_positions,)
 
         # MODEL VARIABLES
-        
+        self.model = model
+        self.beta = model.beta
+        self.attn_norm_c = (model.seq_len/model.d_model)
         self.pred_mode = model.pred_mode
         if self.pred_mode == "last":
             self.ind_possible = self.ind_possible[:, -1:]  # shape (B, 1)
@@ -64,7 +69,8 @@ class EvalContext:
         self.loss_fn = loss_fn  
 
         
-        with torch.no_grad():
+        # with torch.no_grad():
+        with torch.inference_mode():
             self.logits = model(input, mask)  # shape (B, L, V) or (B, 1, V) if pred_mode == "last"
         self.logits_ind = self.logits[self.ind_possible]           # (N, V)
 
@@ -72,6 +78,38 @@ class EvalContext:
         mask_off = torch.ones_like(self.logits_ind, dtype=torch.bool)
         mask_off.scatter_(1, self.ind_target[:, None], False)
         self.off_target_logits = self.logits_ind[mask_off].view(self.logits_ind.size(0), -1)     #(N,V-1)                                                      # (N, V-1)
+
+    # the cached_property decorator ensures that the property is computed only once and cached for future access
+    # we can access the property like property, not like a method, so we don't need to call it with parentheses
+
+    @property
+    def E(self):
+        return self.model.embed.E.weight.T # shape (d, V)
+    @property
+    def P(self):
+        return self.model.embed.P.weight.T # shape (d, L)
+
+    @property
+    def WQK1(self):
+        return self.model.attn1.WQK.weight.T # shape (d, d)
+
+    @property
+    def WQK2(self):
+        return self.model.attn2.WQK.weight.T # shape (d, d)
+
+    @property
+    def WOV1(self):
+        return self.model.attn1.WOV.weight # shape (d, d)
+
+    @property
+    def WOV2(self):
+        return self.model.attn2.WOV.weight # shape (d, d)
+
+    @property
+    def U(self):
+        return self.model.unembed.U.weight # shape (V, d)
+
+    
 
 
 class LossMetric:
@@ -162,3 +200,26 @@ class LogitStatistics:
             "off_logit_var": var_off,
             "on_off_correlation": correlation
         }
+
+class ExpectedOnTargetLogit:
+    def __init__(self):
+        self.name = "h_star"
+
+    def __call__(self, ctx: EvalContext):
+        """
+        Compute the expected on-target logit for positions where induction is possible
+        """
+        h_star = expected_ontarget_logit(ctx.E,
+                                         ctx.P,
+                                         ctx.U,
+                                         ctx.WQK1,
+                                         ctx.WOV1,
+                                         ctx.WQK2,
+                                         ctx.WOV2,
+                                         ctx.trigger_set,
+                                         ctx.beta,
+                                         ctx.attn_norm_c,
+                                         mu=None,
+                                         reduce_triggers=False
+        )
+        return h_star.mean().item()

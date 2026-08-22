@@ -47,9 +47,14 @@ def preprocess_batch(test_batch, device='cpu'):
     # Evaluate target at only trigger positions
     target_ind_positions = target[ind_possible]  # shape (num_masked_positions,)
 
-    test_batch['ind_possible'] = ind_possible
-    test_batch['ind_not_possible'] = ind_not_possible
-    test_batch['target_ind_positions'] = target_ind_positions
+    # Get the list of positions in the batch where induction is possible (is_trigg == 1 and counts > 1)
+    # ind_possible_positions = torch.nonzero(ind_possible, as_tuple=False) # shape (num_masked_positions, 2) where each row is (batch_index, seq_index)
+
+
+    # Add to the batch the masks and the target at the masked positions
+    test_batch['ind_possible'] = ind_possible # shape (B, L)
+    test_batch['ind_not_possible'] = ind_not_possible # shape (B, L)
+    test_batch['target_ind_positions'] = target_ind_positions # shape (num_masked_positions,)
 
     # Move all tensors to the specified device
     test_batch = {k: v.to(device) for k, v in test_batch.items()}

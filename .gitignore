@@ -10,3 +10,5 @@ logs/
 plots/
 # Allow src/icl/data
 !src/icl/data/
+
+*.out
