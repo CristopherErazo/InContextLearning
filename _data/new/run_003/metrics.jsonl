@@ -1,0 +1,4 @@
+{"step": 0, "metric": "top1_accuracy", "value": 0.006211180239915848}
+{"step": 0, "metric": "loss", "value": 4.820530414581299}
+{"step": 50, "metric": "top1_accuracy", "value": 0.012422360479831696}
+{"step": 50, "metric": "loss", "value": 4.822281360626221}

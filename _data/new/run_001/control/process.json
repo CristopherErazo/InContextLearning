@@ -1,0 +1,22 @@
+{
+  "pid": 13148,
+  "run_id": "run_001",
+  "cmd": [
+    "C:\\Users\\crise\\OneDrive - SISSA\\Documents\\SISSA\\SISSA 2nd YEAR\\InContextLearning\\.venv\\Scripts\\python.exe",
+    "-m",
+    "icl.runtime.launcher",
+    "model_args.vocab_size=124",
+    "model_args.alpha_dim=0.9",
+    "model_args.alpha_length=0.5",
+    "data_args.rho=0.2",
+    "optim_args.alpha_lr=0.015",
+    "extra_args.alpha_steps=2",
+    "extra_args.enable_control=True",
+    "extra_args.enable_rewind=False",
+    "extra_args.launch_token=a0e84da10557499999de075e6f05e2a6",
+    "extra_args.experiment_name=new",
+    "extra_args.base_dir=_data"
+  ],
+  "started_at": 1786089865.4847882,
+  "launch_token": "a0e84da10557499999de075e6f05e2a6"
+}

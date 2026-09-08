@@ -1,0 +1,10 @@
+{"step": 0, "name": "logits", "file": "logits_step_0.npy", "type": "tensor"}
+{"step": 27, "name": "logits", "file": "logits_step_27.npy", "type": "tensor"}
+{"step": 54, "name": "logits", "file": "logits_step_54.npy", "type": "tensor"}
+{"step": 82, "name": "logits", "file": "logits_step_82.npy", "type": "tensor"}
+{"step": 109, "name": "logits", "file": "logits_step_109.npy", "type": "tensor"}
+{"step": 137, "name": "logits", "file": "logits_step_137.npy", "type": "tensor"}
+{"step": 164, "name": "logits", "file": "logits_step_164.npy", "type": "tensor"}
+{"step": 192, "name": "logits", "file": "logits_step_192.npy", "type": "tensor"}
+{"step": 219, "name": "logits", "file": "logits_step_219.npy", "type": "tensor"}
+{"step": 247, "name": "logits", "file": "logits_step_247.npy", "type": "tensor"}
