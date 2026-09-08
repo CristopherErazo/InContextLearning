@@ -5,7 +5,8 @@ env/
 .dat
 log/
 logs/
-*data/
+data/
+_data/
 *egg-info/  
 plots/
 # Allow src/icl/data
