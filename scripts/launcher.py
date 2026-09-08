@@ -50,7 +50,8 @@ def build_controller(cfg : TrainerArgs, log_metrics=None, log_to_terminal=True) 
         # hst = get_logit_distributions(model, test_batch, device,n_bins=100)
         mtx = model.get_composed_matrices()
         # means = get_per_position_on_logit_mean(model, test_batch, device)
-        # mtx.update({("means","logits") : means})
+        on_off_logits = get_per_position_on_off_logits(model, test_batch, device)
+        mtx.update({("hists","logits") : (on_off_logits,'pickle')})
         return mtx
 
 
@@ -101,7 +102,7 @@ def main():
     cfg.extra_args.seed, msg = set_seed(cfg.extra_args.seed)
 
     # Build the TrainerController
-    controller = build_controller(cfg,log_to_terminal=True)
+    controller = build_controller(cfg,log_to_terminal=False)
     controller.logger.info(msg)
     
     controller.run_loop()

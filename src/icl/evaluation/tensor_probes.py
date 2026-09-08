@@ -88,7 +88,7 @@ def get_logit_distributions(model, sub_batch, device, n_bins=30):
     }
 
 
-def get_per_position_on_logit_mean(model, sub_batch, device):
+def get_per_position_on_off_logits(model, sub_batch, device):
 
     input = sub_batch['sequence'][:, :-1].to(device) # shape (n_test, seq_len)
     mask = sub_batch['mask'].to(device) # shape (n_test, seq_len, seq_len)
@@ -109,10 +109,23 @@ def get_per_position_on_logit_mean(model, sub_batch, device):
     # Get ontarget logits for positions where induction is possible
     # Target logits
     on_target_logits = masked_logits.gather( 1, masked_targets[:, None]).squeeze(1)    # (N,)
+
+    off_target_logits = masked_logits.clone()
+    off_target_logits[torch.arange(N, device=device), masked_targets] = float('nan')  # set on-target logits to NaN
+    off_target_logits = off_target_logits[~torch.isnan(off_target_logits)]  # remove NaN values
+    off_target_logits = off_target_logits.view(N, -1)  # reshape to (N, V-1)
     # Create a dictionary to store the results for each sequence length
-    results = [on_target_logits[l_idx == l] for l in range(L)]
-    means  = [r.mean().item() for r in results]
-    return np.array(means)
+    on_results = [on_target_logits[l_idx == l] for l in range(L)]
+    off_results = [off_target_logits[l_idx == l] for l in range(L)]
+    all_results = [masked_logits[l_idx == l] for l in range(L)]
+
+    on_results = [r.cpu().numpy() for r in on_results]
+    off_results = [r.cpu().numpy() for r in off_results]
+    all_results = [r.cpu().numpy() for r in all_results]
+    
+
+    return {'on':on_results, 'off':off_results, 'all':all_results}
+
     
 def get_order_parameters(model):
     with torch.no_grad():
