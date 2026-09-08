@@ -18,8 +18,15 @@ from icl.config import TrainerArgs
 
 app = build_dashboard(
     DashboardConfig(
+<<<<<<< HEAD
         base_dir="./_data",
         config_cls=TrainerArgs,
         entrypoint="icl.runtime.launcher",
+=======
+        base_dir="./data",
+        config_cls=TrainerArgs,
+        entrypoint="icl.runtime.launcher",
+        poll_interval_s=1.0
+>>>>>>> 82dd0c462e15da46b2005a6b09dc4112bcd4ba67
     )
 )

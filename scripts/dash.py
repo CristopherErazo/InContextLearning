@@ -5,7 +5,7 @@ only supplies what's specific to icl: which config to build the launch
 form from, and which service module to launch.
 """
 
-from rewind.dashboard import build_dashboard
+from rewind._dashboard import build_dashboard
 from icl.config.default_config import TrainerArgs
 
 app = build_dashboard(

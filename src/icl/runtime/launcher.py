@@ -24,8 +24,10 @@ below to be a valid (optional) config key rather than an OmegaConf error.
 """
 
 import sys
+import time
 
 import torch
+import numpy as np
 from omegaconf import OmegaConf
 
 from icl import *
@@ -87,16 +89,17 @@ def build_controller(cfg, log_metrics=None, log_to_terminal=None) -> TrainerCont
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        # time.sleep(0.3)
 
     def eval_fn():
         return evaluator.evaluate(model, test_batch, loss_fn=loss_fn)
 
     def eval_art_fun():
-        with torch.no_grad():
-            input_ = test_batch["sequence"][:, :-1].to(device)
-            mask = test_batch["mask"].to(device)
-            output = model.full_output(input_, mask=mask)
-        return {"logits": output["logits"].cpu()}
+        # with torch.no_grad():
+        #     input_ = test_batch["sequence"][:, :-1].to(device)
+        #     mask = test_batch["mask"].to(device)
+        #     output = model.full_output(input_, mask=mask)
+        return {"logits": np.random.randn(3)} # for example
 
     # ---- tracker + run-id handshake ---------------------------------------
     exp = ExperimentTracker(cfg.extra_args.experiment_name,base_dir=cfg.extra_args.base_dir)
@@ -134,11 +137,11 @@ def build_controller(cfg, log_metrics=None, log_to_terminal=None) -> TrainerCont
     controller.logger.info(
         f"Running {'WITH' if cfg.extra_args.enable_control else 'WITHOUT'} control features"
     )
-    controller.logger.info(f"Configuration: {OmegaConf.to_yaml(cfg)}")
-    controller.logger.info(f"{frac_kept:.2%} of samples of test_batch kept after filtering")
-    controller.logger.info(
-        f"{frac_ind_possible:.2%} of total positions where induction is possible in test_batch"
-    )
+    # controller.logger.info(f"Configuration: {OmegaConf.to_yaml(cfg)}")
+    # controller.logger.info(f"{frac_kept:.2%} of samples of test_batch kept after filtering")
+    # controller.logger.info(
+        # f"{frac_ind_possible:.2%} of total positions where induction is possible in test_batch"
+    # )
 
     return controller
 
@@ -151,7 +154,7 @@ def main():
     cfg = compute_derived_args(cfg)
     cfg.extra_args.seed, seed_msg = set_seed(cfg.extra_args.seed)
 
-    controller = build_controller(cfg)
+    controller = build_controller(cfg,log_to_terminal=True)
     controller.logger.info(seed_msg)
 
     controller.run_loop()
