@@ -13,3 +13,5 @@ plots/
 !src/icl/data/
 
 *.out
+_data/
+
