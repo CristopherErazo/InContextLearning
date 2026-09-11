@@ -1,22 +1,86 @@
-# Choosing a build backend: 
-requires = ["setuptools"] 
-build-backend = "setuptools.build_meta" 
-
 [project]
 name = "icl"
-version = "0.0.1"
-description = "In context learning experiments"
+version = "0.1.0"
+description = "In-context learning (induction heads) in a minimal two-layer linear-attention transformer"
+readme = "README.md"
 authors = [
-    { name = "Cristopher Erazo", email = "cerazova@sissa.it" }
+    { name = "Cristopher Erazo", email = "cerazova@sissa.it" },
 ]
-dynamic = ["dependencies"] 
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "numpy",
+    "scipy",
+    "pandas",
+    "matplotlib",
+    "omegaconf",
+    "tracklab",
+    "rewind",
+    # What rewind's `dashboard` extra would pull in, listed here directly:
+    # that extra points tracklab at an unpinned GitHub URL, which conflicts
+    # with the pinned source below.
+    "shiny>=1.0",
+    "shinywidgets",
+    "plotly",
+]
 
-[tool.setuptools.packages.find] 
-where = ["src"] 
-exclude = ["scripts", "shell","notebooks"] 
+[project.optional-dependencies]
+# Torch build selection. With no extra, torch comes from PyPI, which already
+# ships CUDA on Linux (the cluster) and CPU-only wheels on Windows / macOS.
+# Pick one of these to be explicit (they are mutually exclusive):
+#   uv sync --extra cpu      small CPU-only wheels (laptops, CI)
+#   uv sync --extra cu126    CUDA 12.6 wheels (Windows GPU box, or pin CUDA on Linux)
+#   uv sync --extra cu130    CUDA 13.0 wheels (needs a recent NVIDIA driver)
+cpu = ["torch"]
+cu126 = ["torch"]
+cu130 = ["torch"]
 
-[tool.setuptools.dynamic] 
-dependencies = { file = ["requirements.txt"] } 
+[dependency-groups]
+dev = ["pytest", "jupyter"]
 
-[project.optional-dependencies] 
-test = ["pytest"]
+[tool.uv]
+conflicts = [
+    [{ extra = "cpu" }, { extra = "cu126" }, { extra = "cu130" }],
+]
+
+[tool.uv.sources]
+# Sibling libraries by the same author, not on PyPI. Pinned to GitHub so that
+# a fresh clone needs no local checkouts. To move to a newer version, change
+# the tag / rev here and run `uv lock --upgrade-package <name>`.
+tracklab = { git = "https://github.com/CristopherErazo/TrackLab", tag = "v1.1.0" }
+rewind = { git = "https://github.com/CristopherErazo/Rewind", tag = "v1.0.0" }
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu126", extra = "cu126" },
+    { index = "pytorch-cu130", extra = "cu130" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# The package body lives directly in src/ (no extra depth) but is installed
+# and imported as `icl`. setuptools maps the name to the directory, and its
+# editable mode installs an import finder that does the same mapping.
+# (hatchling and uv_build cannot rename a prefix in editable mode.)
+package-dir = { "icl" = "src" }
+packages = ["icl", "icl.evaluation"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

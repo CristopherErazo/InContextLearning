@@ -1,15 +1,24 @@
-"""
-This project's dashboard. Everything generic (launch form, status, plot,
-pause/resume/LR/rewind controls) comes from rewind.dashboard -- this file
-only supplies what's specific to icl: which config to build the launch
-form from, and which service module to launch.
+"""Rewind dashboard for this project.
+
+Everything generic (launch form, status, live metrics plot, pause / resume /
+set-lr / rewind controls) comes from rewind.dashboard. This file only says
+which config class to build the launch form from, where runs live, and which
+module to spawn for a new run.
+
+Run from the repo root (the entrypoint is imported as `python -m scripts.launcher`):
+
+    shiny run --reload scripts/dash.py
 """
 
-from rewind._dashboard import build_dashboard
-from icl.config.default_config import TrainerArgs
+from rewind.dashboard import DashboardConfig, build_dashboard
+
+from icl import TrainerArgs
 
 app = build_dashboard(
-    config_cls=TrainerArgs,
-    service_module="icl.runtime.service",
-    experiment_name="logits",
+    DashboardConfig(
+        base_dir="./data",
+        config_cls=TrainerArgs,
+        entrypoint="scripts.launcher",
+        poll_interval_s=1.0,
+    )
 )

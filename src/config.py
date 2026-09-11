@@ -53,6 +53,7 @@ class ExtraArgs:
     enable_rewind: bool = False  # Enable rewind features
     track_artifacts: bool = False
     base_dir : str | None = "./data"  # Base directory for data storage
+    launch_token: str | None = None  # Set by rewind.RunLauncher (dashboard); used for the run_id handshake
    
 
 

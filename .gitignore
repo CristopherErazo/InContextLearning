@@ -1,17 +1,18 @@
+# Python
 __pycache__/
-.python-version
+*.egg-info/
 .venv/
 env/
-.dat
-log/
-logs/
+.python-version
+
+# Run outputs (tracklab layout: data/<experiment>/run_NNN/)
 data/
 _data/
-*egg-info/  
+logs/
+log/
 plots/
-# Allow src/icl/data
-!src/icl/data/
-
 *.out
-_data/
+.dat
 
+# Local-only scratch work (old dashboards, one-off scripts)
+_scratch/

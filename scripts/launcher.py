@@ -1,3 +1,13 @@
+"""Composition root for one training run.
+
+Builds model / optimizer / evaluator, wires them into a rewind.TrainerController
+through three closures, opens a tracklab run and starts the loop.
+
+    python -u scripts/launcher.py model_args.vocab_size=512 extra_args.experiment_name=my_exp
+    python -m scripts.launcher ...        # same thing; this is what the dashboard spawns
+
+Any TrainerArgs field can be overridden with OmegaConf dotted syntax.
+"""
 import sys
 import time
 import torch
@@ -7,6 +17,7 @@ import numpy as np
 from icl import *
 from tracklab import ExperimentTracker
 from rewind import TrainerController, RunMailbox
+from rewind.launch import write_handshake
 
 
 def build_controller(cfg : TrainerArgs, log_metrics=None, log_to_terminal=True) -> TrainerController:
@@ -59,14 +70,20 @@ def build_controller(cfg : TrainerArgs, log_metrics=None, log_to_terminal=True) 
     exp = ExperimentTracker(cfg.extra_args.experiment_name, cfg.extra_args.base_dir)
     tracker_run = exp.start_run(cfg, artifacts=cfg.extra_args.track_artifacts)
 
+    # Run-id handshake: when launched by rewind.RunLauncher (the dashboard), the
+    # child is given extra_args.launch_token and must report back which run_id
+    # it claimed. A plain shell launch never sets the token, so this is a no-op.
+    if cfg.extra_args.launch_token:
+        write_handshake(exp.exp_dir, cfg.extra_args.launch_token, tracker_run.run_id)
+
     log_to_terminal = sys.stdout.isatty() if log_to_terminal is None else log_to_terminal # auto: show progress only if someone's watching
 
     controller = TrainerController(
-        model, optimizer, cfg.extra_args.total_steps, train_step_fn, eval_fn, 
-        run = tracker_run,
-        eval_art_fun = eval_art_fun if cfg.extra_args.track_artifacts else None,
-        control = RunMailbox(tracker_run.run_dir) if cfg.extra_args.enable_control else None,
-        enable_rewind = cfg.extra_args.enable_rewind,
+        model, optimizer, cfg.extra_args.total_steps, train_step_fn, tracker_run,
+        eval_fn=eval_fn,
+        eval_artifacts_fn=eval_art_fun if cfg.extra_args.track_artifacts else None,
+        control=RunMailbox(tracker_run.run_dir) if cfg.extra_args.enable_control else None,
+        enable_rewind=cfg.extra_args.enable_rewind,
         logger_kwargs={"log_to_terminal": log_to_terminal, "log_to_file": True},
         log_metrics=log_metrics or ["loss", "top1_accuracy"])
 
