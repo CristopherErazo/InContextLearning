@@ -1,15 +1,15 @@
-import math
-from pathlib import Path
 from dataclasses import dataclass, field
+
+from omegaconf import OmegaConf
 
 
 ui_metadata = {"metadata" : {"ui":True}} # Used in the fields that we want to display in the launch panel as controls
 
 @dataclass
 class ModelArgs:
-    vocab_size: int = 128 # Vocabulary size
-    d_model: int = 256 # Model dimension
-    seq_len: int = 128 # Sequence length
+    vocab_size: int = 64 # Vocabulary size
+    d_model: int = 64 # Model dimension
+    seq_len: int = 64 # Sequence length
     lin_attn: bool = True  # Whether to use linear attention or not
     beta: float = 0.25  # Scaling factor for output logits
     sigma_0: float = 1.0  # Initial std dev for parameter initialization
@@ -43,8 +43,8 @@ class OptimArgs:
 class ExtraArgs:
     # alpha_steps: float = 10 # n steps = alpha_steps * vocab_size^2 * sqrt(seq_len)
     # total_steps: int = field(default=0) # Total training steps
-    total_steps: int = 160000
-    n_prints: int = 2000  # Metric evaluation frequency
+    total_steps: int = 5000
+    n_prints: int = 50  # Metric evaluation frequency
     n_prints_model: int = 0  # Model checkpoint frequency
     print_scale: str = 'linear'  # Scale for evaluation: log or linear
     experiment_name: str | None  = 'results_test' # Experiment tracking name
@@ -77,4 +77,12 @@ def compute_derived_args(cfg: TrainerArgs) -> TrainerArgs:
     return cfg
 
 
+def load_config(argv: list[str] | None = None) -> TrainerArgs:
+    """Defaults merged with `key=value` CLI overrides, derived fields computed.
 
+    `argv` defaults to `sys.argv[1:]` (OmegaConf's own behaviour). Both
+    scripts/launcher.py and scripts/train.py start from this.
+    """
+    defaults = OmegaConf.structured(TrainerArgs())
+    overrides = OmegaConf.from_cli(argv) if argv is not None else OmegaConf.from_cli()
+    return compute_derived_args(OmegaConf.merge(defaults, overrides))

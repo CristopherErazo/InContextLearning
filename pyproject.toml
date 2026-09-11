@@ -75,11 +75,9 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-# The package body lives directly in src/ (no extra depth) but is installed
-# and imported as `icl`. setuptools maps the name to the directory, and its
-# editable mode installs an import finder that does the same mapping.
-# (hatchling and uv_build cannot rename a prefix in editable mode.)
-package-dir = { "icl" = "src" }
+# Standard src layout: the package is src/icl/ and nothing at the repo root is
+# importable, so `import icl` always means the installed (editable) package.
+package-dir = { "" = "src" }
 packages = ["icl", "icl.evaluation"]
 
 [tool.pytest.ini_options]

@@ -20,6 +20,8 @@ uv sync --extra cpu|cu126|cu130           # explicit torch build; extras are mut
 
 # one training run; any TrainerArgs field overridable with OmegaConf dotted syntax
 uv run python -u scripts/launcher.py model_args.vocab_size=512 extra_args.experiment_name=my_exp
+# same run, plain loop with TrackLab only (no Rewind: no dashboard / pause / rewind)
+uv run python -u scripts/train.py model_args.vocab_size=512 extra_args.experiment_name=my_exp
 
 # dashboard (launch form + live metrics + pause/resume/set-lr/rewind). Run from repo root:
 uv run shiny run --reload scripts/dash.py
@@ -57,27 +59,31 @@ tested and rejected). Consequences:
   the lock covers all of them; never enable two at once. The PyTorch `cu128` index lags
   behind (torch 2.11 while PyPI has 2.14), which is why it is not offered.
 
-## Package layout gotcha
+## Package layout
 
-The package body is `src/` **without** an `icl/` subdirectory, but it is installed and
-imported as `icl` via `package-dir = {"icl" = "src"}` in `pyproject.toml`. Always
-`from icl import ...`, never `from src ...`. When adding a new subpackage under `src/`,
-add it to `packages = [...]` in `pyproject.toml` or it will not be installed.
-`icl/__init__.py` re-exports everything (config, data, model, utils, and all of
-`icl.evaluation.__all__`), which is why `scripts/launcher.py` does `from icl import *`.
+Standard src layout: the package body is `src/icl/` (`package-dir = {"" = "src"}` in
+`pyproject.toml`), installed editable by `uv sync`, so `import icl` only ever resolves
+to the installed package and never to a folder in the working directory. Always
+`from icl import ...`. When adding a new subpackage under `src/icl/`, add it to
+`packages = [...]` in `pyproject.toml` or it will not be installed. `icl/__init__.py`
+re-exports everything (config, data, model, utils, training, and all of
+`icl.evaluation.__all__`); scripts import their names explicitly from `icl`.
+`.vscode/settings.json` points the editor at `.venv` so Pylance resolves `icl`,
+`tracklab` and `rewind`.
 
 ## Architecture
 
-**Config (`src/config.py`).** Nested dataclasses `TrainerArgs{model_args, data_args,
-optim_args, extra_args}`. The launcher does `OmegaConf.merge(OmegaConf.structured(TrainerArgs()),
-OmegaConf.from_cli())` and then **must** call `compute_derived_args` — `data_args.K`
-(= `rho * vocab_size`) and `optim_args.lr` (= `alpha_lr * batch_size / d_model`) are
-placeholders until then. `ui_metadata` marks fields the Rewind dashboard exposes as
+**Config (`src/icl/config.py`).** Nested dataclasses `TrainerArgs{model_args, data_args,
+optim_args, extra_args}`. Both scripts start from `load_config()`, which merges
+`OmegaConf.structured(TrainerArgs())` with `OmegaConf.from_cli()` and then calls
+`compute_derived_args` — `data_args.K` (= `rho * vocab_size`) and `optim_args.lr`
+(= `alpha_lr * batch_size / d_model`) are placeholders until then; anything that builds
+a config by hand must call it too. `ui_metadata` marks fields the Rewind dashboard exposes as
 launch-form controls. `extra_args.launch_token` is set only by the dashboard's
 `RunLauncher`; the launcher answers it with `rewind.launch.write_handshake` so the
 dashboard learns which `run_id` the child claimed.
 
-**Data (`src/data.py`, `generate_icl_batch`).** Trigger tokens are always `0..K-1`
+**Data (`src/icl/data.py`, `generate_icl_batch`).** Trigger tokens are always `0..K-1`
 (fixed across the batch); each sequence samples its own K output tokens from `[K, V-1]`
 and follows the rule "trigger → its output, anything else → uniform random". Sequences
 have length `L+1` (input = `[:, :-1]`, target = `[:, 1:]`). The batch dict carries
@@ -86,7 +92,7 @@ downstream code combines into the "induction possible" mask `is_trigg & (counts 
 The attention `mask` is strictly lower-triangular (`diagonal=-1`): a position never
 attends to itself.
 
-**Model (`src/model.py`, `MinimalTransformer`).** Two `FullRankAttentionLayer`s with
+**Model (`src/icl/model.py`, `MinimalTransformer`).** Two `FullRankAttentionLayer`s with
 no MLP and no residual stream. Layer 1 uses positional embeddings as Q and K and token
 embeddings as V (previous-token head); layer 2 uses token embeddings as Q, layer-1
 output as K, token embeddings as V (induction head). `lin_attn=True` replaces softmax
@@ -97,25 +103,54 @@ layer 2 only for the final query. `get_composed_matrices()` returns the analysis
 objects `M = Pᵀ WQK1 P`, `Q = Eᵀ WQK2 WOV1 E`, `G = U WOV2 E`, keyed as
 `(name, "matrices")` tuples — that key shape is what TrackLab's artifact writer expects.
 
-**Evaluation (`src/evaluation/`).** `preprocess_batch` first drops sequences where
-induction is never possible (`filter_batch`), then adds `ind_possible`,
-`ind_not_possible` and `target_ind_positions` to the batch. `Evaluator` builds one
-`EvalContext` (runs the forward pass once under `inference_mode`, exposes logits,
-on/off-target logits, and the weight matrices as properties) and calls each metric on
-it; a metric returns a scalar (stored under `metric.name`) or a dict (merged). Add new
-scalar metrics as callables in `scalar_measures.py`; tensor-valued diagnostics saved as
-run artifacts go in `tensor_probes.py`; `theory.py` holds closed-form predictions
-(`effective_loss`) compared against runs in notebooks. `get_evaluation_times` turns
-`n_prints` / `n_prints_model` / `print_scale` into the eval and artifact step schedules.
+**Training helpers (`src/icl/training.py`).** `get_optimizer(params, optim_args)` and
+`compute_loss(model, batch, loss_fn, device)` (the training forward pass, honouring
+`pred_mode`). Shared by both scripts; not part of `icl.evaluation`.
 
-**Launcher (`scripts/launcher.py`).** Composition root. `build_controller` wires three
-closures — `train_step_fn`, `eval_fn`, `eval_art_fun` — plus a TrackLab run into
-`rewind.TrainerController`, then overrides `controller.eval_schedule` /
-`eval_artifacts_schedule` with the computed step sets. `enable_control` attaches a
-`RunMailbox` (dashboard pause/resume/rewind commands), `enable_rewind` turns on
-snapshotting, `track_artifacts` enables the artifact closure. `scripts/dash.py` is a
-thin `rewind.dashboard.build_dashboard(DashboardConfig(...))` that spawns new runs as
+**Evaluation (`src/icl/evaluation/`).** One module per job:
+- `batch.py`: `preprocess_batch(batch, device)` drops sequences where induction is never
+  possible (`filter_batch`) and adds the `ind_possible` mask (`is_trigg & counts > 1`).
+  It returns `(batch, PreprocessStats)`; nothing else is precomputed.
+- `evaluator.py`: the probing machinery. `EvalContext(model, batch, loss_fn, step)` is a
+  lazy view of the model on the test batch: `outputs` (one `model.full_output` call under
+  `inference_mode`, train mode restored), `logits`, `attn1/2`, `ind_index`, `logits_ind`,
+  `target_ind`, `on/off_target_logits`, `matrices` (from `model.get_composed_matrices`)
+  are `cached_property`s, so each is computed at most once and only if a probe asks. A
+  *probe* is any callable with a `name` taking an `EvalContext` (the `Probe` protocol).
+  `Evaluator(scalars=[...], artifacts=[...], loss_fn)` memoizes the context on `step`:
+  `scalars(model, batch, step)` returns `dict[str, float]` (a probe may return a dict,
+  merged), `artifacts(model, batch, step)` returns `{(name, group): (data, type)}`, and
+  both calls at the same step share one forward pass. Tensors are moved to CPU / numpy
+  during packing, so probes stay device-agnostic. `log_artifacts(run, artifacts, step)`
+  writes that dict to a TrackLab run (Rewind consumes the same dict directly).
+- `scalars.py`: scalar probes (`LossMetric`, `TopKAccuracy`, `TargetProbMass`,
+  `LogitStatistics`). Add new metrics here.
+- `artifacts.py`: artifact probes; class attributes `group` (artifact subfolder) and
+  `atype` (TrackLab serializer, default `tensor`). A dict result saves one artifact per
+  key, so a probe that wants a single pickled dict returns `{self.name: payload}`
+  (`PerPositionOnOffLogits` does this to keep the `logits/hists_step_N.pkl` layout the
+  notebooks read; `ComposedMatrices` writes `matrices/{M,Q,G}_step_N.npy`).
+- `schedule.py`: `get_evaluation_times(extra_args)` turns `n_prints` / `n_prints_model`
+  / `print_scale` into two step sets spanning `[0, total_steps]` inclusive. Evaluation
+  at step `s` sees the weights before the s-th update, so `total_steps` is the final
+  model; both loops evaluate it after the last update when it is in the schedule.
+
+**Launcher (`scripts/launcher.py`).** Composition root for controllable runs.
+`build_controller` wires three closures — `train_step_fn`, `eval_fn`, `eval_artifacts_fn`
+— plus a TrackLab run into `rewind.TrainerController`, then sets
+`controller.eval_schedule` / `eval_artifacts_schedule` to the computed step sets. The
+two eval closures call `evaluator.scalars/artifacts(..., step=controller.step)`: Rewind
+runs them back to back at the same step, so they share one `EvalContext`. `enable_control`
+attaches a `RunMailbox` (dashboard pause/resume/rewind commands), `enable_rewind` turns on
+snapshotting, `track_artifacts` enables the artifact closure. Terminal logging is on only
+when stdout is a TTY (dashboard-spawned and `nohup` runs log to file only). `scripts/dash.py`
+is a thin `rewind.dashboard.build_dashboard(DashboardConfig(...))` that spawns new runs as
 `python -m scripts.launcher`, so it must be launched from the repo root.
+
+**Plain trainer (`scripts/train.py`).** The same model, probes, schedule and artifact
+layout with the loop written out and only TrackLab used; no Rewind import. Use it when the
+dashboard / rewind machinery is not needed or to check a result independently of Rewind.
+When changing what a run evaluates or saves, change both scripts.
 
 **Notebooks.** Named `YY_MM_DD_Topic.ipynb`; they read runs back with
 `tracklab.ExperimentReader(experiment_name, base_dir='../data')`. Several still import
