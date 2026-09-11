@@ -1,6 +1,6 @@
 import torch
 
-def generate_icl_task_batch(num_samples: int,
+def generate_icl_batch(num_samples: int,
                             V: int,
                             L: int,
                             K: int,
@@ -91,10 +91,59 @@ def generate_icl_task_batch(num_samples: int,
     
     return {
         "sequence": sequence,
-        "trigger_set": trigger_sets,
+        "trigger_set": trigger_sets, # shape (B, K)
         "output_set": output_sets,
         "counts": counts[:, :L],
         "is_trigg": is_trigg[:, :L],
         "mask": batch_mask,
     }
+
+
+if __name__ == "__main__":
+    # Example usage
+    B, V, L, K = 5000, 10, 70, 3
+    batch = generate_icl_batch(num_samples=B, V=V, L=L, K=K)
+    logits = torch.randn(B, L, V)  # shape (B, L, V)
+
+    input = batch["sequence"][:, :-1]  # shape (B, L)
+    is_trigg = batch["is_trigg"]  # shape (B, L)
+    counts = batch["counts"]  # shape (B, L)
+    target = batch["sequence"][:, 1:]  # shape (B, L)
+
+    # Mask for positions where induction is possible (is_trigg == 1 and counts > 1)
+    ind_possible = (is_trigg == 1) & (counts > 1) # shape (B, L)
+
+    # Extract the batch and sequence indices of positions where induction is possible
+    b_idx, l_idx = torch.where(ind_possible) # shape (num_masked_positions,)
+
+    # Masked logits and targets for positions where induction is possible
+    N = b_idx.shape[0]  # number of positions where induction is possible = num_masked_positions
+    masked_logits = logits[b_idx, l_idx]  # shape (num_masked_positions, V)
+    masked_targets = target[b_idx, l_idx]  # shape (num_masked_positions,)
+
+    # Get on-off target logits for positions where induction is possible
+    # Target logits
+    on_target_logits = masked_logits.gather( 1, masked_targets[:, None]).squeeze(1)    # (N,)
+
+    # All non-target logits
+    token_idx = torch.arange(V, device=logits.device)
+    off_mask = token_idx[None, :] != masked_targets[:, None]
+
+    off_target_logits = masked_logits[off_mask].reshape(N, V - 1) # (N, V-1)
+
+    # Create a dictionary to store the results for each sequence length
+    results = {
+        "on": {},
+        "off": {},
+    }
+
+    for l in range(L):
+        mask = l_idx == l
+
+        results["on"][l] = on_target_logits[mask]
+        results["off"][l] = off_target_logits[mask]
+
+        print(f"Sequence length {l}: on = {results['on'][l].shape}, off = {results['off'][l].shape}")
+
+
 

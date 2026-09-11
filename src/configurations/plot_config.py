@@ -24,7 +24,7 @@ def set_font_sizes(conf='normal', factor=1, sizes=None):
     """
     keys = ['font.size', 'axes.labelsize', 'axes.titlesize',
             'xtick.labelsize', 'ytick.labelsize',
-            'legend.fontsize', 'figure.titlesize']
+            'legend.fontsize', 'figure.titlesize'] #['s', 'm', 'm', 'xs', 'xs', 'xs', 'm']
     
     if conf == 'normal':
         sizes = ['m', 'm', 'm', 's', 's', 's', 'l']

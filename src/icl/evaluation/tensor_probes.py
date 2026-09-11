@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 
 
 def get_activations(model, sub_batch, path, device):
@@ -31,8 +32,101 @@ def get_logits(model, sub_batch, path, device):
     return logits
     
 
+def get_logit_distributions(model, sub_batch, device, n_bins=30):
+
+    input = sub_batch['sequence'][:, :-1].to(device) # shape (n_test, seq_len)
+    mask = sub_batch['mask'].to(device) # shape (n_test, seq_len, seq_len)
+
+    with torch.no_grad():
+        logits = model(input,mask)  #shape (n_test, seq_len, vocab_size)
+
+    # Get the masks
+    ind_possible = sub_batch['ind_possible'].to(device) # shape (n_test, seq_len)
+    ind_not_possible = sub_batch['ind_not_possible'].to(device) # shape (n_test, seq_len)
+
+    # Get the target tokens where the induction is possible
+    target_ind = sub_batch['target_ind_positions'].to(device) # shape (num_masked_positions,)
+    # which means that target_ind[i] is the target token (=0,1,...,V-1) for the i-th element in the masked batch
+
+    # Mask logits
+    logits_masked = logits[ind_possible] # shape (num_masked_positions, vocab_size)
+    # for debugg apply softmax to get probabilities
+    # logits_masked = torch.softmax(logits_masked, dim=-1) # shape (num_masked_positions, vocab_size)
+    vmin,vmax = logits_masked.min().item(), logits_masked.max().item()
+
+    # On-target logits: (N_masked,)
+    on_target_logits = logits_masked[
+        torch.arange(logits_masked.size(0), device=device),
+        target_ind,
+    ]
+
+    # Off-target logits: (N_masked, vocab_size - 1)
+    vocab_size = logits_masked.size(-1) 
+    vocab_indices = torch.arange(vocab_size, device=device)
+
+    off_target_mask = vocab_indices.unsqueeze(0) != target_ind.unsqueeze(1)
+    off_target_logits = logits_masked[off_target_mask].reshape(
+        logits_masked.size(0), vocab_size - 1
+    )
+
+    # move to cpu for histogram computation
+    on_target_logits = on_target_logits.detach().cpu()
+    off_target_logits = off_target_logits.detach().cpu()
+
+    # Compute on-off histograms
+    on_hist , edges = torch.histogram(on_target_logits, bins=n_bins, range=(vmin, vmax),density=True)
+    off_hist, _ = torch.histogram(off_target_logits.flatten(), bins=n_bins, range=(vmin, vmax),density=True)
+    return {
+        'on_hist': on_hist,
+        'off_hist': off_hist,
+        'edges': edges,
+        'range': (vmin, vmax),
+        'on_mean': on_target_logits.mean(),
+        'off_mean': off_target_logits.mean(),
+        'on_std': on_target_logits.std(),
+        'off_std': off_target_logits.std(),
+    }
 
 
+def get_per_position_on_off_logits(model, sub_batch, device):
+
+    input = sub_batch['sequence'][:, :-1].to(device) # shape (n_test, seq_len)
+    mask = sub_batch['mask'].to(device) # shape (n_test, seq_len, seq_len)
+    L = input.size(1)
+    with torch.no_grad():
+        logits = model(input,mask)  #shape (n_test, seq_len, vocab_size)
+
+    # Get the masks
+    ind_possible = sub_batch['ind_possible'].to(device) # shape (n_test, seq_len)
+
+    b_idx, l_idx = torch.where(ind_possible) # shape (num_masked_positions,)
+
+    # Masked logits and targets for positions where induction is possible
+    N = b_idx.shape[0]  # number of positions where induction is possible = num_masked_positions
+    masked_logits = logits[b_idx, l_idx]  # shape (num_masked_positions, V)
+    masked_targets = sub_batch['target_ind_positions'].to(device) # shape (num_masked_positions,)
+
+    # Get ontarget logits for positions where induction is possible
+    # Target logits
+    on_target_logits = masked_logits.gather( 1, masked_targets[:, None]).squeeze(1)    # (N,)
+
+    off_target_logits = masked_logits.clone()
+    off_target_logits[torch.arange(N, device=device), masked_targets] = float('nan')  # set on-target logits to NaN
+    off_target_logits = off_target_logits[~torch.isnan(off_target_logits)]  # remove NaN values
+    off_target_logits = off_target_logits.view(N, -1)  # reshape to (N, V-1)
+    # Create a dictionary to store the results for each sequence length
+    on_results = [on_target_logits[l_idx == l] for l in range(L)]
+    off_results = [off_target_logits[l_idx == l] for l in range(L)]
+    all_results = [masked_logits[l_idx == l] for l in range(L)]
+
+    on_results = [r.cpu().numpy() for r in on_results]
+    off_results = [r.cpu().numpy() for r in off_results]
+    all_results = [r.cpu().numpy() for r in all_results]
+    
+
+    return {'on':on_results, 'off':off_results, 'all':all_results}
+
+    
 def get_order_parameters(model):
     with torch.no_grad():
         # Parameters

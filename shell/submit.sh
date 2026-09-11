@@ -1,17 +1,32 @@
 #!/bin/bash
 
-experiment_name='fix_data_uniform'
-K=8
-rank=16
-BS=(5000)
+experiment_name='swap_experiments'
+valuesd=(32 64 128 256 512)
+valuesV=(512)
+# valuesL=(32 64 256 512) # to not repeat the default value of 128, which is already in the first loop
+Nit=3
 
-# ranks=(2 4 8 16)
-
-for bs in "${BS[@]}"
+for i in $(seq 1 $Nit)
 do
-    python -u ./scripts/test.py\
-        extra_args.experiment_name=$experiment_name\
-        model_args.rank=$rank\
-        data_args.K=$K\
-        data_args.batch_size=$bs
+    # add 10 to the seed to avoid overlap with other experiments
+    seed=$((i + 180))
+    for V in "${valuesV[@]}"
+    do
+        echo "Running experiment with d $d and seed $seed"
+        python -u ./scripts/launcher.py\
+            model_args.vocab_size=$V\
+            extra_args.experiment_name=$experiment_name\
+            extra_args.seed=$seed
+    done
+
+    # for L in "${valuesL[@]}"
+    # do
+    #     echo "Running experiment with sequence length $L and seed $i"
+    #     python -u ./scripts/launcher.py\
+    #         extra_args.experiment_name=$experiment_name\
+    #         model_args.seq_len=$L\
+    #         extra_args.seed=$seed
+    # done
 done
+
+

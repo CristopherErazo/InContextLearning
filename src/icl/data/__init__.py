@@ -1,6 +1,3 @@
-from .dual_data import generate_dual_task_batch, get_distributions, get_triggers
+from .trigg_data import generate_icl_batch 
 
-__all__ = [
-    'generate_dual_task_batch',
-    'get_distributions',
-    'get_triggers']
+__all__ = ['generate_icl_batch']

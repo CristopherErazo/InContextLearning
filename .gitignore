@@ -6,8 +6,12 @@ env/
 log/
 logs/
 data/
+_data/
 *egg-info/  
 plots/
 # Allow src/icl/data
 !src/icl/data/
+
+*.out
 _data/
+
