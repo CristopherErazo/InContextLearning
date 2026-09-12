@@ -7,9 +7,9 @@ ui_metadata = {"metadata" : {"ui":True}} # Used in the fields that we want to di
 
 @dataclass
 class ModelArgs:
-    vocab_size: int = 64 # Vocabulary size
-    d_model: int = 64 # Model dimension
-    seq_len: int = 64 # Sequence length
+    vocab_size: int = 128 # Vocabulary size
+    d_model: int = 256 # Model dimension
+    seq_len: int = 128 # Sequence length
     lin_attn: bool = True  # Whether to use linear attention or not
     beta: float = 0.25  # Scaling factor for output logits
     sigma_0: float = 1.0  # Initial std dev for parameter initialization
@@ -29,7 +29,7 @@ class DataArgs:
 
 @dataclass
 class OptimArgs:
-    alpha_lr: float = 3.0  # Base learning rate factor
+    alpha_lr: float = 5.0  # Base learning rate factor
     opt_name: str = "sgd"  # Optimizer type: "adam" or "sgd"
     momentum: float = 0.0  # Momentum for SGD
     weight_decay: float = 0.0  # L2 regularization
@@ -44,7 +44,7 @@ class ExtraArgs:
     # alpha_steps: float = 10 # n steps = alpha_steps * vocab_size^2 * sqrt(seq_len)
     # total_steps: int = field(default=0) # Total training steps
     total_steps: int = 5000
-    n_prints: int = 50  # Metric evaluation frequency
+    n_prints: int = 150  # Metric evaluation frequency
     n_prints_model: int = 0  # Model checkpoint frequency
     print_scale: str = 'linear'  # Scale for evaluation: log or linear
     experiment_name: str | None  = 'results_test' # Experiment tracking name
