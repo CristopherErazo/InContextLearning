@@ -61,11 +61,11 @@ tested and rejected). Consequences:
 
 ## Package layout
 
-Standard src layout: the package body is `src/icl/` (`package-dir = {"" = "src"}` in
-`pyproject.toml`), installed editable by `uv sync`, so `import icl` only ever resolves
-to the installed package and never to a folder in the working directory. Always
-`from icl import ...`. When adding a new subpackage under `src/icl/`, add it to
-`packages = [...]` in `pyproject.toml` or it will not be installed. `icl/__init__.py`
+Standard src layout: the package body is `src/icl/`, discovered automatically by
+`[tool.setuptools.packages.find] where = ["src"]` in `pyproject.toml` and installed
+editable by `uv sync`, so `import icl` only ever resolves to the installed package and
+never to a folder in the working directory. Always `from icl import ...`. A new
+subpackage under `src/icl/` only needs an `__init__.py` to be installed. `icl/__init__.py`
 re-exports everything (config, data, model, utils, training, and all of
 `icl.evaluation.__all__`); scripts import their names explicitly from `icl`.
 `.vscode/settings.json` points the editor at `.venv` so Pylance resolves `icl`,

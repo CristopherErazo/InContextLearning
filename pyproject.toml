@@ -74,11 +74,11 @@ explicit = true
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
+[tool.setuptools.packages.find]
 # Standard src layout: the package is src/icl/ and nothing at the repo root is
 # importable, so `import icl` always means the installed (editable) package.
-package-dir = { "" = "src" }
-packages = ["icl", "icl.evaluation"]
+# Every directory under src/ with an __init__.py is discovered automatically.
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

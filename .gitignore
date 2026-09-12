@@ -16,3 +16,9 @@ plots/
 
 # Local-only scratch work (old dashboards, one-off scripts)
 _scratch/
+
+# Dirs to ignore
+build/
+
+# Local temp copies
+*~
