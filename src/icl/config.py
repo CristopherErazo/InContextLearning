@@ -43,7 +43,7 @@ class OptimArgs:
 class ExtraArgs:
     # alpha_steps: float = 10 # n steps = alpha_steps * vocab_size^2 * sqrt(seq_len)
     # total_steps: int = field(default=0) # Total training steps
-    total_steps: int = 5000
+    total_steps: int = 3000
     n_prints: int = 150  # Metric evaluation frequency
     n_prints_model: int = 0  # Model checkpoint frequency
     print_scale: str = 'linear'  # Scale for evaluation: log or linear
