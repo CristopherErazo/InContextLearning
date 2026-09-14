@@ -22,7 +22,7 @@ from tracklab import ExperimentTracker
 from icl import (
     ComposedMatrices, Evaluator, LossMetric, MinimalTransformer, PerPositionOnOffLogits,
     TopKAccuracy, TrainerArgs, compute_loss, generate_icl_batch, get_evaluation_times,
-    get_optimizer, load_config, log_artifacts, preprocess_batch, set_seed,
+    get_optimizer, load_config, log_artifacts, preprocess_batch, set_seed, AttentionMaps
 )
 
 
@@ -49,7 +49,7 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
     test_batch, batch_stats = preprocess_batch(generate_icl_batch(TB, V, L, K), device)
     evaluator = Evaluator(
         scalars=[TopKAccuracy(1), LossMetric()],
-        artifacts=[ComposedMatrices(), PerPositionOnOffLogits()],
+        artifacts=[AttentionMaps()],
         loss_fn=loss_fn,
     )
     eval_steps, artifact_steps = get_evaluation_times(cfg.extra_args)

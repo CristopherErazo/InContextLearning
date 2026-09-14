@@ -44,10 +44,10 @@ class ExtraArgs:
     # alpha_steps: float = 10 # n steps = alpha_steps * vocab_size^2 * sqrt(seq_len)
     # total_steps: int = field(default=0) # Total training steps
     total_steps: int = 3000
-    n_prints: int = 150  # Metric evaluation frequency
+    n_prints: int = 75  # Metric evaluation frequency
     n_prints_model: int = 0  # Model checkpoint frequency
     print_scale: str = 'linear'  # Scale for evaluation: log or linear
-    experiment_name: str | None  = 'results_test' # Experiment tracking name
+    experiment_name: str | None  = 'attention_map' # Experiment tracking name
     seed: int | None = 42      # Random seed
     enable_control: bool = False  # Enable control features
     enable_rewind: bool = False  # Enable rewind features
