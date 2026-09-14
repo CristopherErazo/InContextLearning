@@ -45,13 +45,13 @@ class ExtraArgs:
     # total_steps: int = field(default=0) # Total training steps
     total_steps: int = 3000
     n_prints: int = 75  # Metric evaluation frequency
-    n_prints_model: int = 0  # Model checkpoint frequency
+    n_prints_model: int = 75  # Model checkpoint frequency
     print_scale: str = 'linear'  # Scale for evaluation: log or linear
     experiment_name: str | None  = 'attention_map' # Experiment tracking name
     seed: int | None = 42      # Random seed
     enable_control: bool = False  # Enable control features
     enable_rewind: bool = False  # Enable rewind features
-    track_artifacts: bool = False
+    track_artifacts: bool = True
     base_dir : str | None = "./data"  # Base directory for data storage
     launch_token: str | None = None  # Set by rewind.RunLauncher (dashboard); used for the run_id handshake
    
