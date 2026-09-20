@@ -23,6 +23,7 @@ to the training step.
 """
 import math
 import sys
+import time
 
 import torch
 from omegaconf import OmegaConf
@@ -96,7 +97,7 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
         log.info(batch_stats.summary())
         log.info(f"Configuration:\n{OmegaConf.to_yaml(cfg)}")
 
-        step, stopped = 0, False
+        step, stopped, t0 = 0, False, time.perf_counter()
         try:
             for step in range(total_steps):
                 metrics = evaluate(run, log, step)
@@ -125,6 +126,14 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
             raise
         else:
             log.info(f"training {'stopped' if stopped else 'done'} at step {step}")
+        finally:
+            # Last line of the log whatever happened: normal end, early stop, divergence,
+            # KeyboardInterrupt or crash. `finally` runs before the exception propagates.
+            elapsed = time.perf_counter() - t0
+            log.info(
+                f"elapsed time = ({elapsed / 60:.2f} min) = ({elapsed/3600:.2f} hr)"
+                f"for {step} steps ({1000 * elapsed / max(step, 1):.1f} ms/step) = ({elapsed / max(step, 1):.4f} s/step)"
+            )
 
 
 def main():
