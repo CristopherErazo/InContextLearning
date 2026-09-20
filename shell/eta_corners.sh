@@ -15,8 +15,8 @@
 set -euo pipefail
 
 EXP="${EXP:-eta_corners}"
-ALPHA_LRS="${ALPHA_LRS:-1250 2500 5000 10000 20000}"   # one below the default, four at/above
-SEEDS="${SEEDS:-1 2 3}"
+ALPHA_LRS="${ALPHA_LRS:-1250 2500 5000 10000 20000}"   # one below the default, four at/above 1250 2500 5000 10000
+SEEDS="${SEEDS:-2 3}"
 STOP_ACC="${STOP_ACC:-0.75}"   # forwarded to eta_scan.sh so both agree
 BUDGET="${BUDGET:-4}"          # total_steps = BUDGET x predicted T*
 JOBS="${JOBS:-2}"

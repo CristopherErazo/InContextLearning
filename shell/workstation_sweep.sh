@@ -18,22 +18,27 @@ set -euo pipefail
 
 # ---------------------------------------------------------------- knobs
 EXP="${EXP:-scaling_sweep}"          # TrackLab experiment; all runs land together
-SEEDS=(${SEEDS:-1 2 3})              # >= 3 seeds per configuration
+SEEDS=(${SEEDS:-1 2})              # >= 3 seeds per configuration
 JOBS="${JOBS:-2}"                    # concurrent runs; the model is tiny, one GPU fits several
-ALPHA_STEPS="${ALPHA_STEPS:-10}"     # budget = ALPHA_STEPS x predicted T* (icl.config.predicted_learning_time)
+ALPHA_STEPS="${ALPHA_STEPS:-15}"     # budget = ALPHA_STEPS x predicted T* (icl.config.predicted_learning_time)
 STOP_ACC="${STOP_ACC:-0.75}"         # early-exit threshold on in-context accuracy
 N_PRINTS="${N_PRINTS:-300}"          # T* resolution = total_steps / N_PRINTS (~0.3% of budget)
 SWEEPS="${SWEEPS:-base L V d}"       # which sub-sweeps to include
-DRY_RUN="${DRY_RUN:-0}"
+ALPHA_LR="${ALPHA_LR:-3500}"        # learning rate for all runs; the grid is in the sweep axes
+DRY_RUN="${DRY_RUN:-0}"             
 read -r -a PY_CMD <<< "${PY:-uv run python}"
 
 # ---------------------------------------------------------------- the grid
 # Baseline is V=128 L=128 d=256; each sub-sweep varies one axis and omits the
 # baseline point, which is run once below. Keep this identical to leonardo_sweep.sh.
 BASE_V=128; BASE_L=128; BASE_D=256
-SWEEP_L=(32 64 256 512)
-SWEEP_V=(64 256 512)
-SWEEP_D=(64 128 512 1024)
+# SWEEP_L=(32 64 256)
+# SWEEP_V=(32 64 256)
+# SWEEP_D=(64 128 512)
+
+SWEEP_L=(512 1024)
+SWEEP_V=(512 1024)
+SWEEP_D=(1024 2048)
 
 CONFIGS=()
 for s in $SWEEPS; do
@@ -70,6 +75,7 @@ launch() {
         extra_args.track_artifacts=false
         extra_args.experiment_name="$EXP"
         extra_args.seed="$seed"
+        optim_args.alpha_lr="$ALPHA_LR"
     )
     if [[ "$DRY_RUN" == "1" ]]; then
         echo "${PY_CMD[*]} ${args[*]}"
@@ -85,7 +91,7 @@ for cfg in "${CONFIGS[@]}"; do
     read -r V L D <<< "$cfg"
     for seed in "${SEEDS[@]}"; do
         if [[ "$DRY_RUN" == "1" || "$JOBS" -le 1 ]]; then
-            launch "$V" "$L" "$D" "$seed"
+            launch "$V" "$L" "$D" "$seed" "$"
         else
             # keep at most $JOBS runs in flight
             while (( $(jobs -rp | wc -l) >= JOBS )); do wait -n; done
