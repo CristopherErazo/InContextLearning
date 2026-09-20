@@ -12,7 +12,16 @@ fields behave exactly as in the launcher.
 Loop convention (shared with rewind.TrainerController): evaluation at step `s`
 sees the weights *before* the s-th update, so step 0 is the initial model and
 `total_steps` is the final one.
+
+`extra_args.stop_at_accuracy` (default None) stops the run at the first scheduled
+evaluation whose `top1_accuracy` reaches the threshold; that step is the measured
+learning time. Its resolution is the scalar evaluation spacing, `total_steps/n_prints`.
+A non-finite evaluation loss stops the run unconditionally: the learning rate has
+blown the weights up and nothing after that point is meaningful. Both tests read the
+metrics already computed by the scheduled evaluation, so neither adds a device sync
+to the training step.
 """
+import math
 import sys
 
 import torch
@@ -37,6 +46,7 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
     B, TB, K = cfg.data_args.batch_size, cfg.data_args.test_size, cfg.data_args.K
     total_steps = cfg.extra_args.total_steps
     track_artifacts = cfg.extra_args.track_artifacts
+    stop_at = cfg.extra_args.stop_at_accuracy  # None disables early stopping
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # ---- model, loss, optimizer ----
@@ -57,8 +67,13 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
         artifact_steps = set()
     log_metrics = log_metrics or ["loss", "top1_accuracy"]
 
-    def evaluate(run, log, step: int) -> None:
-        """Scalars and artifacts for `step`; both read one shared EvalContext."""
+    def evaluate(run, log, step: int) -> dict[str, float] | None:
+        """Scalars and artifacts for `step`; both read one shared EvalContext.
+
+        Returns the scalar metrics when this step is on the scalar schedule, so the
+        loop can test the early-stopping criterion without a second forward pass.
+        """
+        metrics = None
         if step in eval_steps:
             metrics = evaluator.scalars(model, test_batch, step=step)
             run.track_metric(step, **metrics)
@@ -67,6 +82,7 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
             artifacts = evaluator.artifacts(model, test_batch, step=step)
             log_artifacts(run, artifacts, step)
             log.info(f"saved {len(artifacts)} eval artifact(s) at step {step}")
+        return metrics
 
     # ---- the run ----
     exp = ExperimentTracker(cfg.extra_args.experiment_name, cfg.extra_args.base_dir)
@@ -80,16 +96,27 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
         log.info(batch_stats.summary())
         log.info(f"Configuration:\n{OmegaConf.to_yaml(cfg)}")
 
-        step = 0
+        step, stopped = 0, False
         try:
             for step in range(total_steps):
-                evaluate(run, log, step)
+                metrics = evaluate(run, log, step)
+                # A non-finite loss means the run is dead (too large optim_args.alpha_lr);
+                # nothing after this point is meaningful, so stop instead of burning the budget.
+                if metrics is not None and not math.isfinite(metrics.get("loss", 0.0)):
+                    log.error(f"diverged at step {step}: loss={metrics['loss']} -- lower optim_args.alpha_lr")
+                    stopped = True
+                    break
+                if stop_at is not None and metrics is not None and metrics.get("top1_accuracy", 0.0) >= stop_at:
+                    log.info(f"early stop at step {step}: top1_accuracy={metrics['top1_accuracy']:.4f} >= {stop_at}")
+                    stopped = True
+                    break
                 loss = compute_loss(model, generate_icl_batch(B, V, L, K), loss_fn, device)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-            step = total_steps
-            evaluate(run, log, step)  # final weights, if the schedule asks for them
+            if not stopped:
+                step = total_steps
+                evaluate(run, log, step)  # final weights, if the schedule asks for them
         except KeyboardInterrupt:
             log.warning(f"interrupted at step {step}")
             raise
@@ -97,7 +124,7 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
             log.exception(f"training crashed at step {step}")
             raise
         else:
-            log.info(f"training done at step {step}")
+            log.info(f"training {'stopped' if stopped else 'done'} at step {step}")
 
 
 def main():
