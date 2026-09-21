@@ -18,8 +18,8 @@ set -euo pipefail
 
 # ---------------------------------------------------------------- knobs
 EXP="${EXP:-scaling_sweep}"          # TrackLab experiment; all runs land together
-SEEDS=(${SEEDS:-1 2})              # >= 3 seeds per configuration
-JOBS="${JOBS:-2}"                    # concurrent runs; the model is tiny, one GPU fits several
+SEEDS=(${SEEDS:-3 4 5})              # >= 3 seeds per configuration
+JOBS="${JOBS:-1}"                    # concurrent runs; the model is tiny, one GPU fits several
 ALPHA_STEPS="${ALPHA_STEPS:-15}"     # budget = ALPHA_STEPS x predicted T* (icl.config.predicted_learning_time)
 STOP_ACC="${STOP_ACC:-0.75}"         # early-exit threshold on in-context accuracy
 N_PRINTS="${N_PRINTS:-300}"          # T* resolution = total_steps / N_PRINTS (~0.3% of budget)
@@ -32,13 +32,13 @@ read -r -a PY_CMD <<< "${PY:-uv run python}"
 # Baseline is V=128 L=128 d=256; each sub-sweep varies one axis and omits the
 # baseline point, which is run once below. Keep this identical to leonardo_sweep.sh.
 BASE_V=128; BASE_L=128; BASE_D=256
-# SWEEP_L=(32 64 256)
-# SWEEP_V=(32 64 256)
-# SWEEP_D=(64 128 512)
+SWEEP_L=(32 64 256 512)
+SWEEP_V=(32 64 256 512)
+SWEEP_D=(64 128 512 1024)
 
-SWEEP_L=(512 1024)
-SWEEP_V=(512 1024)
-SWEEP_D=(1024 2048)
+# SWEEP_L=(512 1024)
+# SWEEP_V=(512 1024)
+# SWEEP_D=(1024 2048)
 
 CONFIGS=()
 for s in $SWEEPS; do
