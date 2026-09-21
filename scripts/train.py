@@ -32,7 +32,8 @@ from tracklab import ExperimentTracker
 from icl import (
     ComposedMatrices, Evaluator, LossMetric, MinimalTransformer, PerPositionOnOffLogits,
     TopKAccuracy, TrainerArgs, compute_loss, generate_icl_batch, get_evaluation_times,
-    get_optimizer, load_config, log_artifacts, preprocess_batch, set_seed, AttentionMaps
+    get_optimizer, load_config, log_artifacts, preprocess_batch, set_matmul_precision, set_seed,
+    AttentionMaps
 )
 
 
@@ -52,6 +53,10 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
     # Where batches are drawn. "auto" follows the training device, which avoids the
     # host->device copy; see scripts/bench_data.py for which is faster on this machine.
     gen_device = device if cfg.data_args.gen_device == "auto" else cfg.data_args.gen_device
+    # Set before any tensor is touched: it decides whether float32 matmuls run on
+    # the tensor cores (TF32) or the fp32 units, which changes numerics, not just
+    # speed. Recorded in the saved config so runs stay comparable.
+    precision_msg = set_matmul_precision(cfg.extra_args.matmul_precision)
 
     # ---- model, loss, optimizer ----
     model = MinimalTransformer(cfg.model_args).to(device)
@@ -97,6 +102,7 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
         log.info(f"Experiment: {cfg.extra_args.experiment_name} | run_id={run.run_id} | total_steps={total_steps}")
         log.info(f"Device: {device}")
         log.info(opt_msg)
+        log.info(precision_msg)
         log.info(batch_stats.summary())
         log.info(f"Configuration:\n{OmegaConf.to_yaml(cfg)}")
 

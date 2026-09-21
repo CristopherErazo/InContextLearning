@@ -60,6 +60,9 @@ class ExtraArgs:
     print_scale: str = 'linear'  # Scale for evaluation: log or linear
     experiment_name: str | None  = 'icl' # Experiment tracking name
     seed: int | None = 42      # Random seed
+    # float32 matmul mode: "highest" (true fp32), "high" (TF32 on Ampere+), "medium"
+    # (bfloat16 inputs). Changes results as well as speed -- see icl.set_matmul_precision.
+    matmul_precision: str = "highest"
     enable_control: bool = False  # Enable control features
     enable_rewind: bool = False  # Enable rewind features
     track_artifacts: bool = False

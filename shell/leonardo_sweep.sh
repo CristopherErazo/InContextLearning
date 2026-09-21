@@ -63,7 +63,8 @@ N_PRINTS="${N_PRINTS:-300}"          # T* resolution = total_steps / N_PRINTS
 ALPHA_LR="${ALPHA_LR:-4000}"         # eta_0 for every run; the grid is in the sweep axes
 ALPHA_BATCH="${ALPHA_BATCH:-1500}"   # batch-size scale; B = ALPHA_BATCH / (L * frac_solvable)
 MASK_1="${MASK_1:-prev}"             # layer-1 mask: "prev" (j == i-1) or "causal" (j < i)
-GEN_DEVICE="${GEN_DEVICE:-cpu}"      # batch sampling device; see the resource model above
+GEN_DEVICE="${GEN_DEVICE:-cuda}"     # batch sampling device; see the resource model above
+MATMUL_PRECISION="${MATMUL_PRECISION:-high}"  # "highest" = true fp32, "high" = TF32
 
 # ---------------------------------------------------------------- the grid
 # Keep identical to shell/workstation_sweep.sh.
@@ -132,7 +133,8 @@ echo "node       : $(hostname)   gpu: ${CUDA_VISIBLE_DEVICES:-none}"
 echo "array task : $TASK_ID / $((NCONF - 1))"
 echo "config     : V=$V  L=$L  d=$D"
 echo "seeds      : ${SEEDS[*]}  (concurrent, OMP_NUM_THREADS=$OMP_NUM_THREADS each)"
-echo "model      : mask1=$MASK_1  alpha_lr=$ALPHA_LR  alpha_batch=$ALPHA_BATCH  gen_device=$GEN_DEVICE"
+echo "model      : mask1=$MASK_1  alpha_lr=$ALPHA_LR  alpha_batch=$ALPHA_BATCH"
+echo "numerics   : gen_device=$GEN_DEVICE  matmul_precision=$MATMUL_PRECISION"
 echo "budget     : alpha_steps=$ALPHA_STEPS  stop_at_accuracy=$STOP_ACC  n_prints=$N_PRINTS"
 python -c 'import torch;print("torch",torch.__version__,"cuda",torch.cuda.is_available())'
 
@@ -157,6 +159,7 @@ for seed in "${SEEDS[@]}"; do
         model_args.mask1="$MASK_1" \
         data_args.alpha_batch="$ALPHA_BATCH" \
         data_args.gen_device="$GEN_DEVICE" \
+        extra_args.matmul_precision="$MATMUL_PRECISION" \
         > "$LOG_DIR/$tag.log" 2>&1 &
     pids+=("$!")
 done
