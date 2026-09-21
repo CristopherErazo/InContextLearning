@@ -25,10 +25,10 @@ class ModelArgs:
 @dataclass
 class DataArgs:
     alpha_batch: float = 1000.0  # Scaling factor for batch size ~1/(L * frac_solvable)
-    batch_size: int = field(default=0)  # Batch size for training
+    batch_size: int | None = field(default=None)  # Batch size (computed from alpha_batch) if given, overrides alpha_batch
     test_size: int = 256  # Number of samples in test set
     rho: float = 0.2  # Fraction of trigger tokens = K/vocab_size
-    gen_device: str = "cpu"  # Where batches are sampled: "cpu", "cuda", or "auto" (= training device)
+    gen_device: str = "auto"  # Where batches are sampled: "cpu", "cuda", or "auto" (= training device)
     # Computed Values as placeholders; will be computed later
     K: int = field(default=0)  # Number of trigger tokens
 
@@ -62,7 +62,7 @@ class ExtraArgs:
     seed: int | None = 42      # Random seed
     enable_control: bool = False  # Enable control features
     enable_rewind: bool = False  # Enable rewind features
-    track_artifacts: bool = True
+    track_artifacts: bool = False
     base_dir : str | None = "./data"  # Base directory for data storage
     launch_token: str | None = None  # Set by rewind.RunLauncher (dashboard); used for the run_id handshake
    
@@ -85,7 +85,8 @@ def compute_derived_args(cfg: TrainerArgs) -> TrainerArgs:
     cfg.data_args.K = int(cfg.model_args.vocab_size * cfg.data_args.rho)
     cfg.optim_args.lr = cfg.optim_args.alpha_lr / cfg.model_args.d_model
     lmb = cfg.model_args.seq_len / (cfg.model_args.vocab_size * (1 + cfg.data_args.rho))
-    cfg.data_args.batch_size = max(1, int(cfg.data_args.alpha_batch /(cfg.model_args.seq_len * frac_solvable_positions(cfg.data_args.rho, lmb))))
+    if cfg.data_args.batch_size is None:    
+        cfg.data_args.batch_size = max(1, int(cfg.data_args.alpha_batch /(cfg.model_args.seq_len * frac_solvable_positions(cfg.data_args.rho, lmb))))
 
     if cfg.extra_args.alpha_steps is not None:
         # Floor: at very large eta_0 the prediction is a handful of steps, and a run that

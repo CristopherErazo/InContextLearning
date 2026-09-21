@@ -14,25 +14,29 @@
 #
 # Run from the repo root.
 
+# SWEEPS="base L" EXP="sweep_L1_constrained" DRY_RUN=1 nohup bash shell/workstation_sweep.sh > ./logs/sweep.log 2>&1 &
+
 set -euo pipefail
 
 # ---------------------------------------------------------------- knobs
 EXP="${EXP:-scaling_sweep}"          # TrackLab experiment; all runs land together
-SEEDS=(${SEEDS:-3 4 5})              # >= 3 seeds per configuration
+SEEDS=(${SEEDS:-1 2})              # >= 3 seeds per configuration
 JOBS="${JOBS:-1}"                    # concurrent runs; the model is tiny, one GPU fits several
-ALPHA_STEPS="${ALPHA_STEPS:-15}"     # budget = ALPHA_STEPS x predicted T* (icl.config.predicted_learning_time)
+ALPHA_STEPS="${ALPHA_STEPS:-20}"     # budget = ALPHA_STEPS x predicted T* (icl.config.predicted_learning_time)
 STOP_ACC="${STOP_ACC:-0.75}"         # early-exit threshold on in-context accuracy
 N_PRINTS="${N_PRINTS:-300}"          # T* resolution = total_steps / N_PRINTS (~0.3% of budget)
 SWEEPS="${SWEEPS:-base L V d}"       # which sub-sweeps to include
-ALPHA_LR="${ALPHA_LR:-3500}"        # learning rate for all runs; the grid is in the sweep axes
+ALPHA_LR="${ALPHA_LR:-4000}"        # learning rate for all runs; the grid is in the sweep axes
+MASK_1="${MASK_1:-prev}"             # mask for the first attention layer (prev or causal)
+ALPHA_BATCH="${ALPHA_BATCH:-1500}"         # batch size for all runs; the grid is in the sweep axes
 DRY_RUN="${DRY_RUN:-0}"             
 read -r -a PY_CMD <<< "${PY:-uv run python}"
 
 # ---------------------------------------------------------------- the grid
 # Baseline is V=128 L=128 d=256; each sub-sweep varies one axis and omits the
 # baseline point, which is run once below. Keep this identical to leonardo_sweep.sh.
-BASE_V=128; BASE_L=128; BASE_D=256
-SWEEP_L=(32 64 256 512)
+BASE_V=128; BASE_L=128; BASE_D=512
+SWEEP_L=(64 256 512)
 SWEEP_V=(32 64 256 512)
 SWEEP_D=(64 128 512 1024)
 
@@ -76,6 +80,8 @@ launch() {
         extra_args.experiment_name="$EXP"
         extra_args.seed="$seed"
         optim_args.alpha_lr="$ALPHA_LR"
+        model_args.mask1="$MASK_1"
+        data_args.alpha_batch="$ALPHA_BATCH"
     )
     if [[ "$DRY_RUN" == "1" ]]; then
         echo "${PY_CMD[*]} ${args[*]}"

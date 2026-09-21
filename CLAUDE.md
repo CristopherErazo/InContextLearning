@@ -101,8 +101,10 @@ the chain's stationary law, which is exactly weight `2/(V+K)` on output tokens a
 `1/(V+K)` elsewhere. `stats=False` returns only `sequence` / `trigger_set` /
 `output_set` and skips the `counts` work; training passes it, evaluation does not.
 `device=` draws the batch there directly and `data_args.gen_device` (`"cpu"`, `"cuda"`
-or `"auto"` = the training device) is what the scripts pass — measure with
-`scripts/bench_data.py` before changing it. Passing a `torch.Generator` gives a
+or `"auto"` = the training device, the default) is what the scripts pass — measure
+with `scripts/bench_data.py` before changing it. On the A100 workstation the
+vectorised generator is 2–35x faster on CUDA than on CPU and never loses a train
+step, which is why the default is no longer `"cpu"`. Passing a `torch.Generator` gives a
 reproducible stream independent of the global seed.
 
 **The attention mask is not part of a batch.** It is strictly lower-triangular

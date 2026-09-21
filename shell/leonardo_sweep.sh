@@ -23,6 +23,16 @@
 # SEEDS concurrently on the same GPU. That is 3 runs per GPU instead of 3 GPUs,
 # i.e. one third of the billing for the same work.
 #
+# Because the GPU is the contended resource here (SEEDS processes share it) while
+# the 8 CPUs sit idle and are billed anyway, batches are generated on the CPU:
+# GEN_DEVICE=cpu. That is the opposite of the icl.config default ("auto" -> cuda),
+# which was measured on a single run with the GPU to itself. See CLAUDE.md, Data.
+#
+# Walltime. The grid spans a ~250x range in step budget (V=32 is ~800 steps, V=512
+# is ~195k), so a uniform --time is set by the worst case while most tasks finish in
+# minutes. 2h covers everything except V=512 when it never reaches STOP_ACC; if that
+# index hits the limit, resubmit it alone:  sbatch --array=8 --time=06:00:00 ...
+#
 # Usage:
 #   sbatch shell/leonardo_sweep.sh                    # the whole grid
 #   bash   shell/leonardo_sweep.sh --list             # print the grid, submit nothing
@@ -39,18 +49,32 @@ SEEDS=(${SEEDS:-1 2 3})
 ALPHA_STEPS="${ALPHA_STEPS:-10}"     # budget = ALPHA_STEPS x predicted T* (icl.config.predicted_learning_time)
 STOP_ACC="${STOP_ACC:-0.75}"         # early exit; the step reached is T*
 N_PRINTS="${N_PRINTS:-300}"          # T* resolution = total_steps / N_PRINTS
+ALPHA_LR="${ALPHA_LR:-3500}"         # eta_0 for every run; the grid is in the sweep axes
+MASK_1="${MASK_1:-prev}"             # layer-1 mask: "prev" (j == i-1) or "causal" (j < i)
+GEN_DEVICE="${GEN_DEVICE:-cpu}"      # batch sampling device; see the resource model above
 
 # ---------------------------------------------------------------- the grid
 # Keep identical to shell/workstation_sweep.sh.
-BASE_V=128; BASE_L=128; BASE_D=256
+BASE_V=128; BASE_L=128; BASE_D=512
 SWEEP_L=(32 64 256 512)
-SWEEP_V=(64 256 512)
+SWEEP_V=(32 64 256 512)
 SWEEP_D=(64 128 512 1024)
 
-CONFIGS=("$BASE_V $BASE_L $BASE_D")
-for L in "${SWEEP_L[@]}"; do CONFIGS+=("$BASE_V $L $BASE_D"); done
-for V in "${SWEEP_V[@]}"; do CONFIGS+=("$V $BASE_L $BASE_D"); done
-for D in "${SWEEP_D[@]}"; do CONFIGS+=("$BASE_V $BASE_L $D"); done
+# A sub-sweep may contain the baseline value on its own axis (SWEEP_D holds 512 and
+# BASE_D is 512), which would run that point twice under the same seeds and give it
+# double weight in the scaling fit. Append only new points.
+CONFIGS=()
+add_config() {
+    local c="$1" existing
+    for existing in ${CONFIGS[@]+"${CONFIGS[@]}"}; do
+        [[ "$existing" == "$c" ]] && return 0
+    done
+    CONFIGS+=("$c")
+}
+add_config "$BASE_V $BASE_L $BASE_D"
+for L in "${SWEEP_L[@]}"; do add_config "$BASE_V $L $BASE_D"; done
+for V in "${SWEEP_V[@]}"; do add_config "$V $BASE_L $BASE_D"; done
+for D in "${SWEEP_D[@]}"; do add_config "$BASE_V $BASE_L $D"; done
 NCONF=${#CONFIGS[@]}
 
 if [[ "${1:-}" == "--list" ]]; then
@@ -96,6 +120,7 @@ echo "node       : $(hostname)   gpu: ${CUDA_VISIBLE_DEVICES:-none}"
 echo "array task : $TASK_ID / $((NCONF - 1))"
 echo "config     : V=$V  L=$L  d=$D"
 echo "seeds      : ${SEEDS[*]}  (concurrent, OMP_NUM_THREADS=$OMP_NUM_THREADS each)"
+echo "model      : mask1=$MASK_1  alpha_lr=$ALPHA_LR  gen_device=$GEN_DEVICE"
 echo "budget     : alpha_steps=$ALPHA_STEPS  stop_at_accuracy=$STOP_ACC  n_prints=$N_PRINTS"
 python -c 'import torch;print("torch",torch.__version__,"cuda",torch.cuda.is_available())'
 
@@ -116,6 +141,9 @@ for seed in "${SEEDS[@]}"; do
         extra_args.track_artifacts=false \
         extra_args.experiment_name="$EXP" \
         extra_args.seed="$seed" \
+        optim_args.alpha_lr="$ALPHA_LR" \
+        model_args.mask1="$MASK_1" \
+        data_args.gen_device="$GEN_DEVICE" \
         > "$LOG_DIR/$tag.log" 2>&1 &
     pids+=("$!")
 done

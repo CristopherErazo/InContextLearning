@@ -144,7 +144,7 @@ def main():
     cfg = load_config()
     cfg.extra_args.seed, seed_msg = set_seed(cfg.extra_args.seed)
     print(seed_msg)
-    train(cfg,log_to_terminal=False)
+    train(cfg,log_to_terminal=True)
 
 
 if __name__ == "__main__":
