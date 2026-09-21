@@ -6,7 +6,7 @@ Standard src layout: the package body is `src/icl/`.
 
 from icl.config import TrainerArgs, ModelArgs, DataArgs, OptimArgs, ExtraArgs, compute_derived_args, load_config
 from icl.data import generate_icl_batch
-from icl.model import MinimalTransformer
+from icl.model import MinimalTransformer, make_mask
 from icl.utils import set_seed
 from icl.training import get_optimizer, compute_loss
 from icl.evaluation import *  # noqa: F401,F403  (re-exports evaluation.__all__)
@@ -16,7 +16,7 @@ __all__ = [
     "TrainerArgs", "ModelArgs", "DataArgs", "OptimArgs", "ExtraArgs",
     "compute_derived_args", "load_config",
     "generate_icl_batch",
-    "MinimalTransformer",
+    "MinimalTransformer", "make_mask",
     "set_seed",
     "get_optimizer", "compute_loss",
     *_evaluation_all,

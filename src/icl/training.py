@@ -24,7 +24,6 @@ def compute_loss(model, batch: dict, loss_fn, device) -> torch.Tensor:
     """Training loss on one batch: next-token prediction over every position,
     or over the last position only when `model.pred_mode == 'last'`."""
     sequence = batch["sequence"].to(device)      # (B, L+1)
-    mask = batch["mask"].to(device)              # (B, L, L)
-    logits = model(sequence[:, :-1], mask)       # (B, L, V) or (B, 1, V)
+    logits = model(sequence[:, :-1])             # (B, L, V) or (B, 1, V); each layer masks itself
     target = sequence[:, 1:] if model.pred_mode == "next" else sequence[:, -1:]
     return loss_fn(logits.reshape(-1, logits.size(-1)), target.reshape(-1))

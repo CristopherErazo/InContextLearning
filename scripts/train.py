@@ -49,6 +49,9 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
     track_artifacts = cfg.extra_args.track_artifacts
     stop_at = cfg.extra_args.stop_at_accuracy  # None disables early stopping
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Where batches are drawn. "auto" follows the training device, which avoids the
+    # host->device copy; see scripts/bench_data.py for which is faster on this machine.
+    gen_device = device if cfg.data_args.gen_device == "auto" else cfg.data_args.gen_device
 
     # ---- model, loss, optimizer ----
     model = MinimalTransformer(cfg.model_args).to(device)
@@ -57,7 +60,7 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
     optimizer, opt_msg = get_optimizer((p for p in model.parameters() if p.requires_grad), cfg.optim_args)
 
     # ---- fixed test batch, probes, schedules ----
-    test_batch, batch_stats = preprocess_batch(generate_icl_batch(TB, V, L, K), device)
+    test_batch, batch_stats = preprocess_batch(generate_icl_batch(TB, V, L, K, device=gen_device), device)
     evaluator = Evaluator(
         scalars=[TopKAccuracy(1), LossMetric()],
         artifacts=[AttentionMaps()],
@@ -111,7 +114,8 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
                     log.info(f"early stop at step {step}: top1_accuracy={metrics['top1_accuracy']:.4f} >= {stop_at}")
                     stopped = True
                     break
-                loss = compute_loss(model, generate_icl_batch(B, V, L, K), loss_fn, device)
+                loss = compute_loss(model, generate_icl_batch(B, V, L, K, stats=False, device=gen_device),
+                            loss_fn, device)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()

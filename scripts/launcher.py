@@ -31,6 +31,9 @@ def build_controller(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -
     V, L = cfg.model_args.vocab_size, cfg.model_args.seq_len
     B, TB, K = cfg.data_args.batch_size, cfg.data_args.test_size, cfg.data_args.K
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Where batches are drawn. "auto" follows the training device, which avoids the
+    # host->device copy; see scripts/bench_data.py for which is faster on this machine.
+    gen_device = device if cfg.data_args.gen_device == "auto" else cfg.data_args.gen_device
 
     # ---- model, loss, optimizer ----
     model = MinimalTransformer(cfg.model_args).to(device)
@@ -39,7 +42,7 @@ def build_controller(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -
     optimizer, opt_msg = get_optimizer((p for p in model.parameters() if p.requires_grad), cfg.optim_args)
 
     # ---- fixed test batch and probes ----
-    test_batch, batch_stats = preprocess_batch(generate_icl_batch(TB, V, L, K), device)
+    test_batch, batch_stats = preprocess_batch(generate_icl_batch(TB, V, L, K, device=gen_device), device)
     evaluator = Evaluator(
         scalars=[TopKAccuracy(1), LossMetric()],
         artifacts=[ComposedMatrices(), PerPositionOnOffLogits()],
@@ -51,7 +54,8 @@ def build_controller(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -
     # evaluator reuses one EvalContext (one forward pass) for both. `controller`
     # is assigned below; the closures only read it once the loop is running.
     def train_step_fn():
-        loss = compute_loss(model, generate_icl_batch(B, V, L, K), loss_fn, device)
+        loss = compute_loss(model, generate_icl_batch(B, V, L, K, stats=False, device=gen_device),
+                            loss_fn, device)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()

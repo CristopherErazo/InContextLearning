@@ -17,6 +17,8 @@ class ModelArgs:
     beta: float = 0.25  # Scaling factor for output logits
     sigma_0: float = 1.0  # Initial std dev for parameter initialization
     pred_mode: str = "next"  # Prediction mode: "last" or "next"
+    mask1: str = "causal"  # Layer-1 mask: "causal" (j < i) or "prev" (j == i-1 only)
+    mask2: str = "causal"  # Layer-2 mask: "causal" (j < i) or "prev" (j == i-1 only)
     dropout: float = 0.0  # Dropout rate
 
 
@@ -26,6 +28,7 @@ class DataArgs:
     batch_size: int = field(default=0)  # Batch size for training
     test_size: int = 256  # Number of samples in test set
     rho: float = 0.2  # Fraction of trigger tokens = K/vocab_size
+    gen_device: str = "cpu"  # Where batches are sampled: "cpu", "cuda", or "auto" (= training device)
     # Computed Values as placeholders; will be computed later
     K: int = field(default=0)  # Number of trigger tokens
 

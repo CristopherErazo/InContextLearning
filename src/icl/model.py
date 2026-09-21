@@ -3,6 +3,24 @@ import torch
 import torch.nn as nn
 
 
+MASK_KINDS = ("causal", "prev")
+
+
+def make_mask(kind: str, seq_len: int, device=None) -> torch.Tensor:
+  """(L, L) bool mask of positions a query MAY attend to.
+
+  'causal' keeps j < i (strictly lower triangular: a position never attends to
+  itself), 'prev' keeps only j == i - 1 (the previous token alone).
+  """
+  i = torch.arange(seq_len, device=device).unsqueeze(1)
+  j = torch.arange(seq_len, device=device).unsqueeze(0)
+  if kind == "causal":
+    return j < i
+  if kind == "prev":
+    return j == i - 1
+  raise ValueError(f"mask kind must be one of {MASK_KINDS}, got {kind!r}")
+
+
 class EmbeddingModule(nn.Module):
   def __init__(self, vocab_size, seq_len, d_model):
     super().__init__()
@@ -18,21 +36,29 @@ class EmbeddingModule(nn.Module):
 
 class FullRankAttentionLayer(nn.Module):
 
-  def __init__(self, d_model, dropout=0.0, lin_attn=False):
+  def __init__(self, d_model, seq_len, mask_kind="causal", dropout=0.0, lin_attn=False):
     super().__init__()
     self.WQK = nn.Linear(d_model, d_model, bias=False)
     self.WOV = nn.Linear(d_model, d_model, bias=False)
     self.dropout = nn.Dropout(dropout)
     self.lin_attn = lin_attn
     self.d_model = d_model
+    self.mask_kind = mask_kind
+    # The mask is a constant of the layer, so it lives here rather than travelling
+    # with every batch. persistent=False keeps it out of the state_dict, so Rewind
+    # snapshots and checkpoints written before this change still load.
+    self.register_buffer("mask", make_mask(mask_kind, seq_len), persistent=False)
 
-  def forward(self, Q, K, V, mask):
+  def forward(self, Q, K, V, mask=None):
     """Q shape: (B, L_q, d), K shape: (B, L_k, d), V shape: (B, L_k, d)
 
-    mask shape: (B, L_q, L_k) or (1, L_q, L_k)
+    `mask` overrides the layer's own buffer; shape (L_q, L_k) or (B/1, L_q, L_k).
+    Left as None it is the buffer's top-left (L_q, L_k) block, which is what a
+    query over the first L_q positions attending to the first L_k should see.
     """
     B, L_q, d = Q.shape
-    L_k = mask.shape[-1]
+    L_k = K.shape[-2]
+    m = self.mask[:L_q, :L_k] if mask is None else mask
 
     # S shape: (B, L_q, L_k)
     S = self.WQK(Q) @ K.transpose(-2, -1)
@@ -42,11 +68,16 @@ class FullRankAttentionLayer(nn.Module):
       # scale = math.sqrt(d) / math.sqrt(L_k)
       scale = 1/math.sqrt(d*L_k)
       # print("Scale factor for linear attention:", scale)
-      A = S.masked_fill(~mask, 0.0) * scale
+      A = S.masked_fill(~m, 0.0) * scale
     else:
-      A = (S / math.sqrt(d)).masked_fill(~mask, float("-inf")).softmax(
+      A = (S / math.sqrt(d)).masked_fill(~m, float("-inf")).softmax(
           dim=-1
       )
+      # A row with nothing to attend to (position 0 under 'causal', position 0
+      # under 'prev') is all -inf, and softmax turns that into NaN. Zero those
+      # rows instead -- matching what the linear path already does -- while
+      # leaving a NaN from a diverging run visible.
+      A = torch.where(m.any(dim=-1, keepdim=True), A, torch.zeros_like(A))
 
     A = self.dropout(A)
 
@@ -84,14 +115,22 @@ class MinimalTransformer(nn.Module):
     self.sigma_0 = args.sigma_0
     # Prediction mode: 'next' (NTP across sequence) or 'last' (LTP at position L-1)
     self.pred_mode = args.pred_mode 
+    # Each layer masks independently: 'causal' (j < i) or 'prev' (j == i-1).
+    # getattr keeps configs saved before these fields existed loadable.
+    self.mask1 = getattr(args, "mask1", "causal")
+    self.mask2 = getattr(args, "mask2", "causal")
 
     self.embed = EmbeddingModule(self.vocab_size, self.seq_len, self.d_model)
-    self.attn1 = FullRankAttentionLayer(self.d_model, self.drop, self.lin_attn)
-    self.attn2 = FullRankAttentionLayer(self.d_model, self.drop, self.lin_attn)
+    self.attn1 = FullRankAttentionLayer(self.d_model, self.seq_len, self.mask1, self.drop, self.lin_attn)
+    self.attn2 = FullRankAttentionLayer(self.d_model, self.seq_len, self.mask2, self.drop, self.lin_attn)
     self.unembed = UnembeddingModule(self.d_model, self.vocab_size)
 
   def forward(self, x, mask=None):
-    """x shape: (B, L)"""
+    """x shape: (B, L)
+
+    Each layer uses its own mask buffer; `mask` overrides both, for the odd
+    notebook that wants to impose one by hand.
+    """
     B, L = x.shape
 
     e, p = self.embed(x)  # Shapes: (B, L, d)
@@ -99,8 +138,9 @@ class MinimalTransformer(nn.Module):
 
     if self.pred_mode == "last":
       q2 = e[:, -1:, :]  # (B, 1, d)
-      mask2 = mask[:, -1:, :]  # (B, 1, L)
-      # Layer 2 computes attention ONLY for position L-1 attending to 0..L-1
+      # Layer 2 computes attention ONLY for position L-1 attending to 0..L-1,
+      # so it needs that row of the mask, not its first row.
+      mask2 = self.attn2.mask[L - 1:L, :L] if mask is None else mask[..., -1:, :]
       X2, _, _ = self.attn2(q2, X1, e, mask2)  # Output: (B, 1, d)
     else:
       # --- Standard Next-Token Prediction ---
@@ -133,14 +173,15 @@ class MinimalTransformer(nn.Module):
     return composed_matrices
 
 
-  def full_output(self, x, mask):
+  def full_output(self, x, mask=None):
     out = {}
+    L = x.size(1)
     e, p = self.embed(x)
     X1, A1, S1 = self.attn1(p, p, e, mask)
     # X2, A2, S2 = self.attn2(e, X1, e, mask)
     if self.pred_mode == "last":
       q2 = e[:, -1:, :]  # (B, 1, d)
-      mask2 = mask[:, -1:, :]  # (B, 1, L)
+      mask2 = self.attn2.mask[L - 1:L, :L] if mask is None else mask[..., -1:, :]
       X2, A2, S2 = self.attn2(q2, X1, e, mask2)  # Output: (B, 1, d)
     else:
       X2, A2, S2 = self.attn2(e, X1, e, mask)  # Output: (B, L, d)
@@ -199,10 +240,9 @@ if __name__ == "__main__":
     L = model.seq_len
     d = model.d_model
     input = torch.randint(0, model.vocab_size, (B, L)).to(device)
-    mask = torch.tril(torch.ones(B, L, L)).bool().to(device)  # Causal mask
     res = {}
     with torch.no_grad():
-      output = model.full_output(input, mask)
+      output = model.full_output(input)
       for key, value in output.items():
         if 'S' in key:
           continue  # Skip raw attention scores
@@ -226,6 +266,8 @@ if __name__ == "__main__":
     beta = 1.0
     sigma_0 = 1.0
     pred_mode = "next"
+    mask1 = "causal"
+    mask2 = "causal"
   device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
   print(f"d\tL\tV\t\tX1\t\tA1\t\tX2\t\tA2\t\tlogits")

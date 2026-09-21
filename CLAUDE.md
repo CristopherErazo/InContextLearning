@@ -33,8 +33,9 @@ bash shell/monitor.sh 0.5 30              # kills the current launcher once top1
 # module self-checks (each has an __main__ block)
 uv run python -m icl.data
 uv run python -m icl.model
+uv run python -u scripts/bench_data.py --step   # loop vs vectorised sampler, CPU vs CUDA
 
-uv run pytest                             # pytest is configured (testpaths=tests) but there is no tests/ yet
+uv run pytest                             # tests/ holds the data-generator checks (testpaths=tests)
 ```
 
 Run outputs land in `data/<experiment_name>/run_NNN/` (gitignored). `_scratch/` is
@@ -89,14 +90,38 @@ and follows the rule "trigger → its output, anything else → uniform random".
 have length `L+1` (input = `[:, :-1]`, target = `[:, 1:]`). The batch dict carries
 `is_trigg` and `counts` (occurrence count of the token at each position), which
 downstream code combines into the "induction possible" mask `is_trigg & (counts > 1)`.
-The attention `mask` is strictly lower-triangular (`diagonal=-1`): a position never
-attends to itself.
+
+The generator is loop-free. Because outputs are drawn from `[K, V-1]` they are never
+triggers, so no two triggers can be adjacent, and the chain has the closed form
+`T_t = b_t ∧ ¬T_{t-1}`, `x_t = output_set[u_{t-1}] if T_{t-1} else u_t` with
+`u_t` i.i.d. uniform and `b_t = 1{u_t < K}`; the trigger flags follow from run parity
+(a `cummax`) and `counts` from a stable argsort. That invariant is load-bearing — if
+outputs ever overlap the trigger set, this derivation is void. Position 0 is drawn from
+the chain's stationary law, which is exactly weight `2/(V+K)` on output tokens and
+`1/(V+K)` elsewhere. `stats=False` returns only `sequence` / `trigger_set` /
+`output_set` and skips the `counts` work; training passes it, evaluation does not.
+`device=` draws the batch there directly and `data_args.gen_device` (`"cpu"`, `"cuda"`
+or `"auto"` = the training device) is what the scripts pass — measure with
+`scripts/bench_data.py` before changing it. Passing a `torch.Generator` gives a
+reproducible stream independent of the global seed.
+
+**The attention mask is not part of a batch.** It is strictly lower-triangular
+(`diagonal=-1`: a position never attends to itself) and constant, so carrying it per
+batch cost `B*L*L` bytes — 78–95% of every batch — for no information. Build one with
+`icl.make_mask(kind, seq_len, device)`: `"causal"` keeps `j < i`, `"prev"` keeps only
+`j == i-1`. Notebooks that read `batch['mask']` predate this and will fail at that line.
 
 **Model (`src/icl/model.py`, `MinimalTransformer`).** Two `FullRankAttentionLayer`s with
 no MLP and no residual stream. Layer 1 uses positional embeddings as Q and K and token
 embeddings as V (previous-token head); layer 2 uses token embeddings as Q, layer-1
-output as K, token embeddings as V (induction head). `lin_attn=True` replaces softmax
-with masked scores scaled by `1/sqrt(d*L)`. `initialize_model()` freezes everything
+output as K, token embeddings as V (induction head). Each layer owns its mask as a
+non-persistent `(L, L)` bool buffer built from `model_args.mask1` / `mask2`, so the two
+can differ — `mask1=prev` restricts layer 1 to the previous token alone while layer 2
+stays `causal`, which is the intended ablation. `forward` / `full_output` still accept
+an optional `mask=` that overrides both. `lin_attn=True` replaces softmax
+with masked scores scaled by `1/sqrt(d*L)`; the softmax path zeroes rows that have
+nothing to attend to (position 0 under either mask) instead of returning NaN, which is
+what the linear path already did. `initialize_model()` freezes everything
 and then unfreezes only `attn1.WQK`, `attn2.WQK`, `attn2.WOV`; E, P, U and `attn1.WOV`
 stay at random init. Logits are `beta * U(X2) / sqrt(d)`. `pred_mode="last"` runs
 layer 2 only for the final query. `get_composed_matrices()` returns the analysis

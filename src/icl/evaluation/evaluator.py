@@ -37,7 +37,7 @@ def split_on_off(logits: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Ten
 class EvalContext:
     """Lazy view of (model, batch) at one training step.
 
-    Cheap tensors (inputs, targets, masks) are set eagerly. Anything that runs
+    Cheap tensors (inputs, targets, the induction mask) are set eagerly. Anything that runs
     the model or multiplies weights is a `cached_property`: computed at most
     once per context and only if some probe asks for it. A context must not
     outlive the weights it was built for; `Evaluator` handles that by keying
@@ -53,7 +53,6 @@ class EvalContext:
         seq = batch["sequence"].to(self.device)                     # (B, L+1)
         self.input = seq[:, :-1]                                    # (B, L)
         self.target = seq[:, 1:]                                    # (B, L)
-        self.mask = batch["mask"].to(self.device)                   # (B, L, L)
         self.trigger_set = batch["trigger_set"][0].to(self.device)  # (K,) same for every sequence
         self.ind_possible = batch["ind_possible"].to(self.device)   # (B, L)
         if model.pred_mode == "last":
@@ -72,7 +71,7 @@ class EvalContext:
         self.model.eval()
         try:
             with torch.inference_mode():
-                return self.model.full_output(self.input, self.mask)
+                return self.model.full_output(self.input)
         finally:
             self.model.train(was_training)
 
