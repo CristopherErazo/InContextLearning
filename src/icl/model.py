@@ -29,9 +29,18 @@ class EmbeddingModule(nn.Module):
     self.d_model = d_model
 
   def forward(self, x):
+    """Returns `e` (B, L, d) token embeddings and `p` (1, L, d) positional ones.
+
+    `p` keeps a batch dimension of 1 instead of being expanded to B. Layer 1
+    uses it as both Q and K, so its scores `P WQK1 P^T` are the same for every
+    sequence in the batch; computing them once instead of B times removes
+    `2 B L d^2 + 2 B L^2 d` FLOPs, about a quarter of the forward pass at
+    d_model=512. The resulting (1, L, L) attention broadcasts against the
+    (B, L, d) values in `A @ V`, which is where the batch re-enters.
+    """
     positions = torch.arange(x.size(1), device=x.device)
     e = self.E(x)
-    p = self.P(positions).unsqueeze(0).expand(x.size(0), -1, -1)
+    p = self.P(positions).unsqueeze(0)
     return e, p
 
 class FullRankAttentionLayer(nn.Module):
@@ -79,6 +88,10 @@ class FullRankAttentionLayer(nn.Module):
       # leaving a NaN from a diverging run visible.
       A = torch.where(m.any(dim=-1, keepdim=True), A, torch.zeros_like(A))
 
+    # NOTE: when Q and K carry a batch dimension of 1 (layer 1, whose Q and K are
+    # both the positional table) a non-zero dropout draws ONE mask shared by the
+    # whole batch rather than one per sequence. model_args.dropout is 0.0 in every
+    # configuration this repo runs; revisit here if that changes.
     A = self.dropout(A)
 
     # Output projection: Y shape (B, L_q, d)
@@ -178,6 +191,10 @@ class MinimalTransformer(nn.Module):
     L = x.size(1)
     e, p = self.embed(x)
     X1, A1, S1 = self.attn1(p, p, e, mask)
+    # Layer 1's scores are batch-independent, so they come back as (1, L, L).
+    # Expand to B so probes, saved artifacts and notebooks keep the (B, L, L)
+    # shape they have always seen; expand is a stride-0 view and costs nothing.
+    A1, S1 = A1.expand(x.size(0), -1, -1), S1.expand(x.size(0), -1, -1)
     # X2, A2, S2 = self.attn2(e, X1, e, mask)
     if self.pred_mode == "last":
       q2 = e[:, -1:, :]  # (B, 1, d)

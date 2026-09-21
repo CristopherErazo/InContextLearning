@@ -18,20 +18,31 @@
 # Resource model. --account comes from $SBATCH_ACCOUNT. 8 CPUs per GPU is the
 # billing ratio (8/32 == 1/4 == the GPU fraction), so the GPU sets the rate and
 # the CPUs are free: 8 CPUh per wallclock hour per array task. The model is tiny
-# (two linear-attention layers, no MLP), so one A100 is nowhere near saturated by
-# a single run -- each array task therefore takes one configuration and runs its
-# SEEDS concurrently on the same GPU. That is 3 runs per GPU instead of 3 GPUs,
-# i.e. one third of the billing for the same work.
+# (two linear-attention layers, no MLP), so at small d_model one A100 is nowhere
+# near saturated by a single run -- each array task therefore takes one
+# configuration and runs its SEEDS concurrently on the same GPU.
+#
+# CAVEAT, measured 2026-09-21 on the A100-PCIE workstation at the current baseline
+# (V=128 L=128 d=512 B=218): one run already saturates the card. Three concurrent
+# seeds ran at 41.2 ms/step each = 13.7 ms per step of work, versus 12.5 ms/step
+# for one run at a time. Packing gained nothing. When the GPU is saturated the
+# billing argument collapses -- 3 seeds on 1 GPU for 3T costs the same as 3 seeds
+# on 3 GPUs for T -- and only the wallclock differs, in favour of not packing.
+# Packing still pays at d=64/128 (indices 9, 10). If the d=512 tasks prove too slow,
+# split seeds into their own array tasks rather than raising --time.
 #
 # Because the GPU is the contended resource here (SEEDS processes share it) while
 # the 8 CPUs sit idle and are billed anyway, batches are generated on the CPU:
 # GEN_DEVICE=cpu. That is the opposite of the icl.config default ("auto" -> cuda),
 # which was measured on a single run with the GPU to itself. See CLAUDE.md, Data.
 #
-# Walltime. The grid spans a ~250x range in step budget (V=32 is ~800 steps, V=512
-# is ~195k), so a uniform --time is set by the worst case while most tasks finish in
-# minutes. 2h covers everything except V=512 when it never reaches STOP_ACC; if that
-# index hits the limit, resubmit it alone:  sbatch --array=8 --time=06:00:00 ...
+# Walltime. The grid spans a ~250x range in step budget (index 5, V=32, is 1360
+# steps; index 8, V=512, is 342053), so a uniform --time is set by the worst case
+# while most tasks finish in minutes. Runs that learn exit at ~T*, i.e. 1/ALPHA_STEPS
+# of the budget; --time is insurance against the ones that never reach STOP_ACC.
+# 2h does NOT cover index 8 (nor 7, 4) in that failure case. Submit in two groups:
+#   sbatch --array=0-3,5,6,9-11 --time=00:45:00 shell/leonardo_sweep.sh
+#   sbatch --array=4,7,8        --time=06:00:00 shell/leonardo_sweep.sh
 #
 # Usage:
 #   sbatch shell/leonardo_sweep.sh                    # the whole grid
@@ -46,17 +57,18 @@ set -euo pipefail
 # ---------------------------------------------------------------- knobs
 EXP="${EXP:-scaling_sweep}"
 SEEDS=(${SEEDS:-1 2 3})
-ALPHA_STEPS="${ALPHA_STEPS:-10}"     # budget = ALPHA_STEPS x predicted T* (icl.config.predicted_learning_time)
+ALPHA_STEPS="${ALPHA_STEPS:-20}"     # budget = ALPHA_STEPS x predicted T* (icl.config.predicted_learning_time)
 STOP_ACC="${STOP_ACC:-0.75}"         # early exit; the step reached is T*
 N_PRINTS="${N_PRINTS:-300}"          # T* resolution = total_steps / N_PRINTS
-ALPHA_LR="${ALPHA_LR:-3500}"         # eta_0 for every run; the grid is in the sweep axes
+ALPHA_LR="${ALPHA_LR:-4000}"         # eta_0 for every run; the grid is in the sweep axes
+ALPHA_BATCH="${ALPHA_BATCH:-1500}"   # batch-size scale; B = ALPHA_BATCH / (L * frac_solvable)
 MASK_1="${MASK_1:-prev}"             # layer-1 mask: "prev" (j == i-1) or "causal" (j < i)
 GEN_DEVICE="${GEN_DEVICE:-cpu}"      # batch sampling device; see the resource model above
 
 # ---------------------------------------------------------------- the grid
 # Keep identical to shell/workstation_sweep.sh.
 BASE_V=128; BASE_L=128; BASE_D=512
-SWEEP_L=(32 64 256 512)
+SWEEP_L=(64 256 512 1024)
 SWEEP_V=(32 64 256 512)
 SWEEP_D=(64 128 512 1024)
 
@@ -120,7 +132,7 @@ echo "node       : $(hostname)   gpu: ${CUDA_VISIBLE_DEVICES:-none}"
 echo "array task : $TASK_ID / $((NCONF - 1))"
 echo "config     : V=$V  L=$L  d=$D"
 echo "seeds      : ${SEEDS[*]}  (concurrent, OMP_NUM_THREADS=$OMP_NUM_THREADS each)"
-echo "model      : mask1=$MASK_1  alpha_lr=$ALPHA_LR  gen_device=$GEN_DEVICE"
+echo "model      : mask1=$MASK_1  alpha_lr=$ALPHA_LR  alpha_batch=$ALPHA_BATCH  gen_device=$GEN_DEVICE"
 echo "budget     : alpha_steps=$ALPHA_STEPS  stop_at_accuracy=$STOP_ACC  n_prints=$N_PRINTS"
 python -c 'import torch;print("torch",torch.__version__,"cuda",torch.cuda.is_available())'
 
@@ -143,6 +155,7 @@ for seed in "${SEEDS[@]}"; do
         extra_args.seed="$seed" \
         optim_args.alpha_lr="$ALPHA_LR" \
         model_args.mask1="$MASK_1" \
+        data_args.alpha_batch="$ALPHA_BATCH" \
         data_args.gen_device="$GEN_DEVICE" \
         > "$LOG_DIR/$tag.log" 2>&1 &
     pids+=("$!")
