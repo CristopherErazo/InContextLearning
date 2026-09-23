@@ -68,3 +68,67 @@ class LogitStatistics:
             "off_logit_var": off.var().item(),
             "on_off_covariance": cov.item(),
         }
+
+
+def _trigger_mask(ctx: EvalContext, V: int) -> torch.Tensor:
+    """(V,) bool: True on the trigger tokens, on the CPU where the matrices live."""
+    mask = torch.zeros(V, dtype=torch.bool)
+    mask[ctx.trigger_set.cpu()] = True
+    return mask
+
+
+class MOrderParameters:
+    """Order parameters of `M = P^T WQK1 P`, whose active part is the strictly
+    lower triangle (a query attends only to j < i): `M_on` is the first
+    sub-diagonal, `M_off` everything below it."""
+
+    name = "M_order_parameters"
+    names = ("M_on", "M_off")
+
+    def __call__(self, ctx: EvalContext) -> dict[str, float]:
+        M = ctx.matrices["M"]                                    # (L, L)
+        L = M.size(0)
+        scale = ctx.model.embed.d_model ** 0.5
+        on = M.diagonal(-1).sum() / (scale * (L - 1))            # M_{mu, mu-1}, mu = 2..L
+        off = 2 * M.tril(-2).sum() / (scale * (L - 1) * (L - 2))  # mu = 3..L, nu <= mu-2
+        return {"M_on": on.item(), "M_off": off.item()}
+
+
+class QOrderParameters:
+    """Order parameters of `Q = E^T WQK2 WOV1 E`: the trigger diagonal, the
+    off-diagonal trigger rows, and the non-trigger rows."""
+
+    name = "Q_order_parameters"
+    names = ("Q_on", "Q_T", "Q_noT")
+
+    def __call__(self, ctx: EvalContext) -> dict[str, float]:
+        Q = ctx.matrices["Q"]                                    # (V, V)
+        V = Q.size(0)
+        scale = ctx.model.embed.d_model ** 0.5
+        trig = _trigger_mask(ctx, V)
+        K = int(trig.sum())
+        diag = Q.diagonal()
+        on = diag[trig].sum() / (scale * K)
+        q_t = (Q[trig].sum() - diag[trig].sum()) / (scale * K * (V - 1))
+        q_no = Q[~trig].sum() / (scale * V * (V - K))
+        return {"Q_on": on.item(), "Q_T": q_t.item(), "Q_noT": q_no.item()}
+
+
+class GammaOrderParameters:
+    """Order parameters of `Gamma = U WOV2 E`: the non-trigger diagonal, the
+    trigger rows, and the off-diagonal non-trigger rows."""
+
+    name = "G_order_parameters"
+    names = ("G_on", "G_T", "G_noT")
+
+    def __call__(self, ctx: EvalContext) -> dict[str, float]:
+        G = ctx.matrices["G"]                                    # (V, V)
+        V = G.size(0)
+        scale = ctx.model.embed.d_model ** 0.5
+        trig = _trigger_mask(ctx, V)
+        K = int(trig.sum())
+        diag = G.diagonal()
+        on = diag[~trig].sum() / (scale * (V - K))
+        g_t = G[trig].sum() / (scale * K * V)
+        g_no = (G[~trig].sum() - diag[~trig].sum()) / (scale * (V - K) * (V - 1))
+        return {"G_on": on.item(), "G_T": g_t.item(), "G_noT": g_no.item()}

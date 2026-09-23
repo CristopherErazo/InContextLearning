@@ -11,7 +11,8 @@ Both calls at the same `step` share one forward pass through `EvalContext`.
 from .batch import PreprocessStats, filter_batch, induction_mask, preprocess_batch
 from .schedule import evaluation_steps, get_evaluation_times
 from .evaluator import Artifacts, EvalContext, Evaluator, Probe, log_artifacts, split_on_off
-from .scalars import LogitStatistics, LossMetric, TargetProbMass, TopKAccuracy
+from .scalars import (GammaOrderParameters, LogitStatistics, LossMetric, MOrderParameters,
+                      QOrderParameters, TargetProbMass, TopKAccuracy)
 from .artifacts import AttentionMaps, ComposedMatrices, LogitHistograms, PerPositionOnOffLogits
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "EvalContext", "Evaluator", "Probe", "Artifacts", "log_artifacts", "split_on_off",
     # scalar probes
     "LossMetric", "TopKAccuracy", "TargetProbMass", "LogitStatistics",
+    "MOrderParameters", "QOrderParameters", "GammaOrderParameters",
     # artifact probes
     "ComposedMatrices", "PerPositionOnOffLogits", "LogitHistograms", "AttentionMaps",
 ]
