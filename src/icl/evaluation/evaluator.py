@@ -53,7 +53,7 @@ class EvalContext:
         seq = batch["sequence"].to(self.device)                     # (B, L+1)
         self.input = seq[:, :-1]                                    # (B, L)
         self.target = seq[:, 1:]                                    # (B, L)
-        self.trigger_set = batch["trigger_set"][0].to(self.device)  # (K,) same for every sequence
+        self.K = int(batch["K"])                                    # triggers are the tokens 0..K-1
         self.ind_possible = batch["ind_possible"].to(self.device)   # (B, L)
         if model.pred_mode == "last":
             # the model only emits logits for the final query; keep masks aligned with (B, 1, V)
@@ -117,6 +117,18 @@ class EvalContext:
     @property
     def off_target_logits(self) -> torch.Tensor:  # (N, V-1)
         return self.on_off_logits[1]
+
+    # ---- vocabulary ---------------------------------------------------------------
+
+    @property
+    def V(self) -> int:
+        return self.model.embed.E.num_embeddings
+
+    @cached_property
+    def trigger_mask(self) -> torch.Tensor:
+        """(V,) bool, on the CPU where the composed matrices live: True on the
+        trigger tokens, which are always `0..K-1`."""
+        return torch.arange(self.V) < self.K
 
     # ---- weights ------------------------------------------------------------------
 

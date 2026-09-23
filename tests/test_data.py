@@ -32,16 +32,17 @@ def five_sigma(p: float, n: int) -> float:
 
 def test_keys_and_shapes():
     batch = gen()
-    assert set(batch) == {"sequence", "trigger_set", "output_set", "counts", "is_trigg"}
+    assert set(batch) == {"sequence", "K", "output_set", "counts", "is_trigg"}
     assert batch["sequence"].shape == (B, L + 1)
     assert batch["counts"].shape == batch["is_trigg"].shape == (B, L)
-    assert batch["output_set"].shape == batch["trigger_set"].shape == (B, K)
+    assert batch["output_set"].shape == (B, K)
+    assert batch["K"] == K
     assert "mask" not in batch, "the mask belongs to the model, not to the batch"
 
 
 def test_stats_false_skips_the_bookkeeping():
     batch = gen(stats=False)
-    assert set(batch) == {"sequence", "trigger_set", "output_set"}
+    assert set(batch) == {"sequence", "K", "output_set"}
     # and gives the same sequences as stats=True for the same stream
     assert torch.equal(batch["sequence"], gen()["sequence"])
 
@@ -63,7 +64,7 @@ def test_trigger_rule_is_exact():
 def test_is_trigg_and_no_two_in_a_row():
     batch = gen()
     seq, is_trigg = batch["sequence"], batch["is_trigg"]
-    assert torch.equal(is_trigg, seq[:, :L] < K)
+    assert torch.equal(is_trigg, seq[:, :L] < K), "the triggers are exactly the tokens 0..K-1"
     assert not (is_trigg[:, :-1] & is_trigg[:, 1:]).any(), "an output is never a trigger"
 
 

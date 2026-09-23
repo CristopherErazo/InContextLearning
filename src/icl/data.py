@@ -1,7 +1,8 @@
 """Sampling for the trigger-retrieval task.
 
 The sequence is a Markov chain on the vocabulary: a *trigger* token (always
-`0..K-1`) is followed by its own output token, anything else is followed by a
+`0..K-1`, a convention the rest of the code relies on: the batch carries the
+scalar `K`, never a trigger-set tensor) is followed by its own output token, anything else is followed by a
 uniform draw. Each sequence draws its own K distinct output tokens from
 `[K, V-1]`, so **an output is never a trigger** and the chain can never emit two
 triggers in a row. That invariant is what makes the generator loop-free.
@@ -25,7 +26,7 @@ from __future__ import annotations
 
 import torch
 
-Batch = dict[str, torch.Tensor]
+Batch = dict[str, torch.Tensor | int]
 
 
 def generate_icl_batch(num_samples: int,
@@ -51,7 +52,7 @@ def generate_icl_batch(num_samples: int,
     Returns:
         dict with:
             sequence     : (B, L+1)   input is [:, :-1], target is [:, 1:]
-            trigger_set  : (B, K)     always 0..K-1, the same for every sequence
+            K            : int        the triggers are the tokens 0..K-1
             output_set   : (B, K)     trigger i of sequence b maps to [b, i]
             counts       : (B, L)     occurrences of the token at each position,
                                       counting that position (only if `stats`)
@@ -97,7 +98,7 @@ def generate_icl_batch(num_samples: int,
 
     batch: Batch = {
         "sequence": sequence,                                       # (B, L+1)
-        "trigger_set": torch.arange(K, device=device).expand(B, -1),  # (B, K)
+        "K": K,                                                     # triggers are 0..K-1
         "output_set": output_sets,                                  # (B, K)
     }
     if stats:
@@ -138,7 +139,8 @@ if __name__ == "__main__":
         for _ in range(5):
             batch = generate_icl_batch(B, V, L, K, stats=stats)
         dt = (time.perf_counter() - t0) / 5
-        nbytes = sum(v.numel() * v.element_size() for v in batch.values())
+        nbytes = sum(v.numel() * v.element_size()
+                     for v in batch.values() if torch.is_tensor(v))
         print(f"stats={stats!s:5} {dt * 1000:7.1f} ms/batch  {nbytes / 1e6:6.1f} MB  keys={list(batch)}")
 
     batch = generate_icl_batch(B, V, L, K)

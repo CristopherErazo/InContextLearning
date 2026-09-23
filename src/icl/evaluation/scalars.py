@@ -70,13 +70,6 @@ class LogitStatistics:
         }
 
 
-def _trigger_mask(ctx: EvalContext, V: int) -> torch.Tensor:
-    """(V,) bool: True on the trigger tokens, on the CPU where the matrices live."""
-    mask = torch.zeros(V, dtype=torch.bool)
-    mask[ctx.trigger_set.cpu()] = True
-    return mask
-
-
 class MOrderParameters:
     """Order parameters of `M = P^T WQK1 P`, whose active part is the strictly
     lower triangle (a query attends only to j < i): `M_on` is the first
@@ -105,8 +98,7 @@ class QOrderParameters:
         Q = ctx.matrices["Q"]                                    # (V, V)
         V = Q.size(0)
         scale = ctx.model.embed.d_model ** 0.5
-        trig = _trigger_mask(ctx, V)
-        K = int(trig.sum())
+        trig, K = ctx.trigger_mask, ctx.K
         diag = Q.diagonal()
         on = diag[trig].sum() / (scale * K)
         q_t = (Q[trig].sum() - diag[trig].sum()) / (scale * K * (V - 1))
@@ -125,8 +117,7 @@ class GammaOrderParameters:
         G = ctx.matrices["G"]                                    # (V, V)
         V = G.size(0)
         scale = ctx.model.embed.d_model ** 0.5
-        trig = _trigger_mask(ctx, V)
-        K = int(trig.sum())
+        trig, K = ctx.trigger_mask, ctx.K
         diag = G.diagonal()
         on = diag[~trig].sum() / (scale * (V - K))
         g_t = G[trig].sum() / (scale * K * V)

@@ -87,7 +87,9 @@ dashboard learns which `run_id` the child claimed.
 **Data (`src/icl/data.py`, `generate_icl_batch`).** Trigger tokens are always `0..K-1`
 (fixed across the batch); each sequence samples its own K output tokens from `[K, V-1]`
 and follows the rule "trigger → its output, anything else → uniform random". Sequences
-have length `L+1` (input = `[:, :-1]`, target = `[:, 1:]`). The batch dict carries
+have length `L+1` (input = `[:, :-1]`, target = `[:, 1:]`). The trigger set is never
+materialised: the batch carries only the scalar `K`, and "token `< K`" is the
+trigger test everywhere (evaluation depends on this). The batch dict also carries
 `is_trigg` and `counts` (occurrence count of the token at each position), which
 downstream code combines into the "induction possible" mask `is_trigg & (counts > 1)`.
 
@@ -98,8 +100,8 @@ triggers, so no two triggers can be adjacent, and the chain has the closed form
 (a `cummax`) and `counts` from a stable argsort. That invariant is load-bearing — if
 outputs ever overlap the trigger set, this derivation is void. Position 0 is drawn from
 the chain's stationary law, which is exactly weight `2/(V+K)` on output tokens and
-`1/(V+K)` elsewhere. `stats=False` returns only `sequence` / `trigger_set` /
-`output_set` and skips the `counts` work; training passes it, evaluation does not.
+`1/(V+K)` elsewhere. `stats=False` returns only `sequence` / `K` / `output_set`
+and skips the `counts` work; training passes it, evaluation does not.
 `device=` draws the batch there directly and `data_args.gen_device` (`"cpu"`, `"cuda"`
 or `"auto"` = the training device, the default) is what the scripts pass — measure
 with `scripts/bench_data.py` before changing it. On the A100 workstation the

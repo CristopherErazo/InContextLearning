@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import torch
 
-Batch = dict[str, torch.Tensor]
+Batch = dict[str, torch.Tensor | int]
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,10 @@ def filter_batch(batch: Batch, device: str | torch.device = "cpu") -> tuple[Batc
     Returns the filtered batch (on `device`) and the fraction of sequences kept.
     """
     keep = induction_mask(batch).any(dim=-1)  # (B,)
-    filtered = {k: v.to(device)[keep] for k, v in batch.items()}
+    # Only per-sequence tensors are sliced; scalars (`K`) and anything else
+    # whose leading dimension is not the batch pass through untouched.
+    filtered = {k: (v.to(device)[keep] if torch.is_tensor(v) and v.shape[:1] == keep.shape else v)
+                for k, v in batch.items()}
     return filtered, keep.float().mean().item()
 
 
