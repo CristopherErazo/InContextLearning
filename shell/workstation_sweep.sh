@@ -22,13 +22,14 @@ set -euo pipefail
 EXP="${EXP:-scaling_sweep}"          # TrackLab experiment; all runs land together
 SEEDS=(${SEEDS:-1 2})              # >= 3 seeds per configuration
 JOBS="${JOBS:-1}"                    # concurrent runs; the model is tiny, one GPU fits several
-ALPHA_STEPS="${ALPHA_STEPS:-20}"     # budget = ALPHA_STEPS x predicted T* (icl.config.predicted_learning_time)
+ALPHA_STEPS="${ALPHA_STEPS:-30}"     # budget = ALPHA_STEPS x predicted T* (icl.config.predicted_learning_time)
 STOP_ACC="${STOP_ACC:-0.75}"         # early-exit threshold on in-context accuracy
-N_PRINTS="${N_PRINTS:-300}"          # T* resolution = total_steps / N_PRINTS (~0.3% of budget)
+N_PRINTS="${N_PRINTS:-400}"          # T* resolution = total_steps / N_PRINTS (~0.3% of budget)
 SWEEPS="${SWEEPS:-base L V d}"       # which sub-sweeps to include
-ALPHA_LR="${ALPHA_LR:-4000}"        # learning rate for all runs; the grid is in the sweep axes
+ALPHA_LR="${ALPHA_LR:-3500}"        # learning rate for all runs; the grid is in the sweep axes
 MASK_1="${MASK_1:-prev}"             # mask for the first attention layer (prev or causal)
 ALPHA_BATCH="${ALPHA_BATCH:-1500}"         # batch size for all runs; the grid is in the sweep axes
+BATCH_SIZE="${BATCH_SIZE:-512}"         # override alpha_batch 
 # Measured on the A100 workstation 2026-09-21, at the baseline V=128 L=128 d=512:
 #   tf32 off, gen cpu   5.00 ms/step      tf32 on, gen cpu    5.00 -> jobs=2: 3.80 agg
 #   tf32 on,  gen cuda  3.70 ms/step      tf32 on, gen cuda -> jobs=2: 4.05 agg
@@ -103,6 +104,7 @@ launch() {
         data_args.alpha_batch="$ALPHA_BATCH"
         data_args.gen_device="$GEN_DEVICE"
         extra_args.matmul_precision="$MATMUL_PRECISION"
+        data_args.batch_size="$BATCH_SIZE"
     )
     if [[ "$DRY_RUN" == "1" ]]; then
         echo "${PY_CMD[*]} ${args[*]}"
