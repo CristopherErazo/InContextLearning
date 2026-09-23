@@ -33,7 +33,7 @@ from icl import (
     ComposedMatrices, Evaluator, LossMetric, MinimalTransformer, PerPositionOnOffLogits,
     TopKAccuracy, TrainerArgs, compute_loss, generate_icl_batch, get_evaluation_times,
     get_optimizer, load_config, log_artifacts, preprocess_batch, set_matmul_precision, set_seed,
-    AttentionMaps
+    AttentionMaps, MOrderParameters, QOrderParameters, GammaOrderParameters
 )
 
 
@@ -67,8 +67,13 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
     # ---- fixed test batch, probes, schedules ----
     test_batch, batch_stats = preprocess_batch(generate_icl_batch(TB, V, L, K, device=gen_device), device)
     evaluator = Evaluator(
-        scalars=[TopKAccuracy(1), LossMetric()],
-        artifacts=[AttentionMaps()],
+        scalars=[TopKAccuracy(1), 
+                 LossMetric(),
+                 MOrderParameters(),
+                 QOrderParameters(),
+                 GammaOrderParameters()],
+        artifacts=[ComposedMatrices(), 
+                   PerPositionOnOffLogits()],
         loss_fn=loss_fn,
     )
     eval_steps, artifact_steps = get_evaluation_times(cfg.extra_args)
