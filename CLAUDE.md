@@ -22,6 +22,9 @@ uv sync --extra cpu|cu126|cu130           # explicit torch build; extras are mut
 uv run python -u scripts/launcher.py model_args.vocab_size=512 extra_args.experiment_name=my_exp
 # same run, plain loop with TrackLab only (no Rewind: no dashboard / pause / rewind)
 uv run python -u scripts/train.py model_args.vocab_size=512 extra_args.experiment_name=my_exp
+# same model in the reduced (M, Q, G) coordinates: exact for SGD, cost independent of d
+uv run python -u scripts/train.py model_args.backend=reduced model_args.init=full ...
+uv run python -u scripts/train.py model_args.backend=reduced model_args.init=sample model_args.infinite_d=true ...
 
 # dashboard (launch form + live metrics + pause/resume/set-lr/rewind). Run from repo root:
 uv run shiny run --reload scripts/dash.py
@@ -132,33 +135,67 @@ layer 2 only for the final query. `get_composed_matrices()` returns the analysis
 objects `M = Pᵀ WQK1 P`, `Q = Eᵀ WQK2 WOV1 E`, `G = U WOV2 E`, keyed as
 `(name, "matrices")` tuples — that key shape is what TrackLab's artifact writer expects.
 
-**Training helpers (`src/icl/training.py`).** `get_optimizer(params, optim_args)` and
-`compute_loss(model, batch, loss_fn, device)` (the training forward pass, honouring
-`pred_mode`). Shared by both scripts; not part of `icl.evaluation`.
+**Reduced backend (`src/icl/reduced.py`, `model_args.backend="reduced"`).** The same
+model trained by SGD, rewritten in the coordinates the loss depends on. The logits
+depend on the trained weights only through M (L×L), Q, G (V×V), and an SGD step on
+(WQK1, WQK2, WOV2) moves them exactly by `M -= eta K_P dM K_P`, `Q -= eta K_E dQ K_R`,
+`G -= eta K_U dG K_E`, with fixed Gram matrices `K_P = PPᵀ`, `K_E = EEᵀ`, `K_U = UUᵀ`,
+`K_R = E WOV1ᵀ WOV1 Eᵀ`. `ReducedTransformer` stores everything normalised
+(`m = M/√d`, `k = K/d`), which leaves no d in the forward pass: a step costs
+O(B L² V) whatever d_model is, and `d = inf` is `k = I`. `ReducedSGD` applies the
+Gram-scaled step with `lr = eta_0 = alpha_lr` (momentum and weight decay map across
+exactly; Adam does not, so the backend refuses anything but SGD, and also
+`lin_attn=False` and dropout). `model_args.init="full"` composes an initialised
+`MinimalTransformer` (the same random draw a full run makes, so old runs can be
+reproduced; the d×d weights have to fit once), and `"sample"` draws the Gram matrices
+(Bartlett) and initial m, q, g from their joint law directly (any d ≥ max(L, V), and
+`model_args.infinite_d=true`). `tests/test_reduced.py` checks the full and reduced SGD
+trajectories agree to 1e-9 in float64 and the sampled init has the full init's
+moments. Rerunning `large_d_sweep_1/run_005` (d=2048, L=512) with `init=full` gave
+the same early-stop step with metrics equal to ~1e-4 relative (TF32), at 25 vs 356
+ms/step. `get_composed_matrices()` returns the full model's M, Q, G (at d = inf, the
+normalised ones); `normalized_matrices()` returns M/√d etc. Only `scripts/train.py`
+builds it; `scripts/launcher.py` refuses `backend != "full"`.
+
+**Training helpers (`src/icl/training.py`).** `build_model(model_args, optim_args,
+device)` returns `(model, optimizer, log_line)` for either backend (the full path is
+exactly `MinimalTransformer` + `initialize_model` + `get_optimizer`).
+`get_optimizer(params, optim_args)` and `compute_loss(model, batch, loss_fn, device)`
+(the training forward pass, honouring `pred_mode`). Shared by both scripts; not part
+of `icl.evaluation`.
 
 **Evaluation (`src/icl/evaluation/`).** One module per job:
 - `batch.py`: `preprocess_batch(batch, device)` drops sequences where induction is never
   possible (`filter_batch`) and adds the `ind_possible` mask (`is_trigg & counts > 1`).
   It returns `(batch, PreprocessStats)`; nothing else is precomputed.
-- `evaluator.py`: the probing machinery. `EvalContext(model, batch, loss_fn, step)` is a
-  lazy view of the model on the test batch: `outputs` (one `model.full_output` call under
-  `inference_mode`, train mode restored), `logits`, `attn1/2`, `ind_index`, `logits_ind`,
-  `target_ind`, `on/off_target_logits`, `matrices` (from `model.get_composed_matrices`)
-  are `cached_property`s, so each is computed at most once and only if a probe asks. A
+- `evaluator.py`: the probing machinery. `EvalContext(model, batch, step, chunk)` is a
+  lazy view of the model on the test batch. One forward pass under `inference_mode`
+  (train mode restored) runs over the batch `chunk` sequences at a time and keeps only
+  `token_loss` (per-position cross-entropy, (B, L)) and `logits_ind` (logits at
+  induction-possible positions, (N, V)); no (B, L, V) or (B, L, d) tensor outlives a
+  chunk. `ind_index`, `target_ind`, `on/off_target_logits`, `matrices` (from
+  `model.get_composed_matrices`) and `normalized_matrices` (divided by √d) are
+  computed at most once and only if a probe asks. `outputs` / `attn1/2` are one
+  UNCHUNKED `model.full_output` call, for probes that want the attention maps. A
   *probe* is any callable with a `name` taking an `EvalContext` (the `Probe` protocol).
-  `Evaluator(scalars=[...], artifacts=[...], loss_fn)` memoizes the context on `step`:
+  `Evaluator(scalars=[...], artifacts=[...], chunk)` memoizes the context on `step`:
   `scalars(model, batch, step)` returns `dict[str, float]` (a probe may return a dict,
   merged), `artifacts(model, batch, step)` returns `{(name, group): (data, type)}`, and
   both calls at the same step share one forward pass. Tensors are moved to CPU / numpy
   during packing, so probes stay device-agnostic. `log_artifacts(run, artifacts, step)`
   writes that dict to a TrackLab run (Rewind consumes the same dict directly).
 - `scalars.py`: scalar probes (`LossMetric`, `TopKAccuracy`, `TargetProbMass`,
-  `LogitStatistics`). Add new metrics here.
+  `LogitStatistics`, and the `M/Q/GammaOrderParameters`, which read
+  `normalized_matrices` so they also work at d = inf). Add new metrics here.
 - `artifacts.py`: artifact probes; class attributes `group` (artifact subfolder) and
   `atype` (TrackLab serializer, default `tensor`). A dict result saves one artifact per
   key, so a probe that wants a single pickled dict returns `{self.name: payload}`
-  (`PerPositionOnOffLogits` does this to keep the `logits/hists_step_N.pkl` layout the
-  notebooks read; `ComposedMatrices` writes `matrices/{M,Q,G}_step_N.npy`).
+  (`PerPositionOnOffLogits` does this for `logits/hists_step_N.pkl`; `ComposedMatrices`
+  writes `matrices/{M,Q,G}_step_N.npy`). `PerPositionOnOffLogits(fractions)` saves only
+  the positions `ceil(f*L) - 1` for `f` in `extra_args.logit_positions` (default
+  `[0.5, 0.75, 1.0]`): the pickle is `{'fractions', 'positions', 'on', 'off', 'all'}`
+  with one array per saved position. Runs before this change hold one array per
+  position (L of them), so old notebooks indexing `lg['on'][l]` need `positions` now.
 - `schedule.py`: `get_evaluation_times(extra_args)` turns `n_prints` / `n_prints_model`
   / `print_scale` into two step sets spanning `[0, total_steps]` inclusive. Evaluation
   at step `s` sees the weights before the s-th update, so `total_steps` is the final
@@ -179,7 +216,11 @@ is a thin `rewind.dashboard.build_dashboard(DashboardConfig(...))` that spawns n
 **Plain trainer (`scripts/train.py`).** The same model, probes, schedule and artifact
 layout with the loop written out and only TrackLab used; no Rewind import. Use it when the
 dashboard / rewind machinery is not needed or to check a result independently of Rewind.
-When changing what a run evaluates or saves, change both scripts.
+When changing what a run evaluates or saves, change both scripts. It is the only script
+that runs `backend=reduced`. Both pass `extra_args.eval_chunk` (default: the training
+batch size, which needs less memory than a training step) to the `Evaluator`.
+`track_results` records `train_time` and `eval_time` separately, `ms_per_step` of
+training alone, and `peak_gpu_mem_gib`.
 
 **Notebooks.** Named `YY_MM_DD_Topic.ipynb`; they read runs back with
 `tracklab.ExperimentReader(experiment_name, base_dir='../data')`. Several still import

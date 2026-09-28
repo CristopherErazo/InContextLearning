@@ -14,7 +14,7 @@ MaskName = Literal["all", "ind", "no_ind"]
 
 
 class LossMetric:
-    """Cross-entropy on a subset of positions: every position, only
+    """Mean cross-entropy on a subset of positions: every position, only
     induction-possible ones, or only the rest."""
 
     def __init__(self, name: str = "loss", mask: MaskName = "all"):
@@ -23,10 +23,8 @@ class LossMetric:
         self.name, self.mask = name, mask
 
     def __call__(self, ctx: EvalContext) -> float:
-        if ctx.loss_fn is None:
-            raise RuntimeError("LossMetric needs Evaluator(loss_fn=...)")
         mask = {"all": ctx.all, "ind": ctx.ind_possible, "no_ind": ctx.ind_not_possible}[self.mask]
-        return ctx.loss_fn(ctx.logits[mask], ctx.target[mask]).item()
+        return ctx.token_loss[mask].mean().item()
 
 
 class TopKAccuracy:
@@ -79,11 +77,10 @@ class MOrderParameters:
     names = ("M_on", "M_off")
 
     def __call__(self, ctx: EvalContext) -> dict[str, float]:
-        M = ctx.matrices["M"]                                    # (L, L)
+        M = ctx.normalized_matrices["M"]                         # (L, L), M / sqrt(d)
         L = M.size(0)
-        scale = ctx.model.embed.d_model ** 0.5
-        on = M.diagonal(-1).sum() / (scale * (L - 1))            # M_{mu, mu-1}, mu = 2..L
-        off = 2 * M.tril(-2).sum() / (scale * (L - 1) * (L - 2))  # mu = 3..L, nu <= mu-2
+        on = M.diagonal(-1).sum() / (L - 1)                      # M_{mu, mu-1}, mu = 2..L
+        off = 2 * M.tril(-2).sum() / ((L - 1) * (L - 2))         # mu = 3..L, nu <= mu-2
         return {"M_on": on.item(), "M_off": off.item()}
 
 
@@ -95,14 +92,13 @@ class QOrderParameters:
     names = ("Q_on", "Q_T", "Q_noT")
 
     def __call__(self, ctx: EvalContext) -> dict[str, float]:
-        Q = ctx.matrices["Q"]                                    # (V, V)
+        Q = ctx.normalized_matrices["Q"]                         # (V, V), Q / sqrt(d)
         V = Q.size(0)
-        scale = ctx.model.embed.d_model ** 0.5
         trig, K = ctx.trigger_mask, ctx.K
         diag = Q.diagonal()
-        on = diag[trig].sum() / (scale * K)
-        q_t = (Q[trig].sum() - diag[trig].sum()) / (scale * K * (V - 1))
-        q_no = Q[~trig].sum() / (scale * V * (V - K))
+        on = diag[trig].sum() / K
+        q_t = (Q[trig].sum() - diag[trig].sum()) / (K * (V - 1))
+        q_no = Q[~trig].sum() / (V * (V - K))
         return {"Q_on": on.item(), "Q_T": q_t.item(), "Q_noT": q_no.item()}
 
 
@@ -114,12 +110,11 @@ class GammaOrderParameters:
     names = ("G_on", "G_T", "G_noT")
 
     def __call__(self, ctx: EvalContext) -> dict[str, float]:
-        G = ctx.matrices["G"]                                    # (V, V)
+        G = ctx.normalized_matrices["G"]                         # (V, V), G / sqrt(d)
         V = G.size(0)
-        scale = ctx.model.embed.d_model ** 0.5
         trig, K = ctx.trigger_mask, ctx.K
         diag = G.diagonal()
-        on = diag[~trig].sum() / (scale * (V - K))
-        g_t = G[trig].sum() / (scale * K * V)
-        g_no = (G[~trig].sum() - diag[~trig].sum()) / (scale * (V - K) * (V - 1))
+        on = diag[~trig].sum() / (V - K)
+        g_t = G[trig].sum() / (K * V)
+        g_no = (G[~trig].sum() - diag[~trig].sum()) / ((V - K) * (V - 1))
         return {"G_on": on.item(), "G_T": g_t.item(), "G_noT": g_no.item()}

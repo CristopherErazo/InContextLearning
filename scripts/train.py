@@ -20,6 +20,10 @@ A non-finite evaluation loss stops the run unconditionally: the learning rate ha
 blown the weights up and nothing after that point is meaningful. Both tests read the
 metrics already computed by the scheduled evaluation, so neither adds a device sync
 to the training step.
+
+`model_args.backend=reduced` trains the same model in the (M, Q, G) coordinates
+(icl.reduced): exact for SGD, and a step costs the same at any d_model. With
+`model_args.init=sample` it also runs at `model_args.infinite_d=true`.
 """
 import math
 import sys
@@ -30,10 +34,10 @@ from omegaconf import OmegaConf
 from tracklab import ExperimentTracker
 
 from icl import (
-    ComposedMatrices, Evaluator, LossMetric, MinimalTransformer, PerPositionOnOffLogits,
-    TopKAccuracy, TrainerArgs, compute_loss, generate_icl_batch, get_evaluation_times,
-    get_optimizer, load_config, log_artifacts, preprocess_batch, set_matmul_precision, set_seed,
-    AttentionMaps, MOrderParameters, QOrderParameters, GammaOrderParameters
+    ComposedMatrices, Evaluator, GammaOrderParameters, LossMetric, MOrderParameters,
+    PerPositionOnOffLogits, QOrderParameters, TopKAccuracy, TrainerArgs, build_model,
+    compute_loss, generate_icl_batch, get_evaluation_times, load_config, log_artifacts,
+    preprocess_batch, set_matmul_precision, set_seed,
 )
 
 
@@ -59,44 +63,59 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
     precision_msg = set_matmul_precision(cfg.extra_args.matmul_precision)
 
     # ---- model, loss, optimizer ----
-    model = MinimalTransformer(cfg.model_args).to(device)
-    model.initialize_model()
+    model, optimizer, opt_msg = build_model(cfg.model_args, cfg.optim_args, device)
     loss_fn = torch.nn.CrossEntropyLoss()
-    optimizer, opt_msg = get_optimizer((p for p in model.parameters() if p.requires_grad), cfg.optim_args)
 
     # ---- fixed test batch, probes, schedules ----
     test_batch, batch_stats = preprocess_batch(generate_icl_batch(TB, V, L, K, device=gen_device), device)
+    # The test batch is evaluated `eval_chunk` sequences at a time. Its default, the
+    # training batch size, needs less memory than a training step (no autograd graph).
     evaluator = Evaluator(
-        scalars=[TopKAccuracy(1), 
+        scalars=[TopKAccuracy(1),
                  LossMetric(),
                  MOrderParameters(),
                  QOrderParameters(),
                  GammaOrderParameters()],
-        artifacts=[ComposedMatrices(), 
-                   PerPositionOnOffLogits()],
-        loss_fn=loss_fn,
+        artifacts=[ComposedMatrices(),
+                   PerPositionOnOffLogits(cfg.extra_args.logit_positions)],
+        chunk=cfg.extra_args.eval_chunk or B,
     )
     eval_steps, artifact_steps = get_evaluation_times(cfg.extra_args)
     if not track_artifacts:
         artifact_steps = set()
     log_metrics = log_metrics or ["loss", "top1_accuracy"]
 
-    def evaluate(run, log, step: int, force:bool=False) -> dict[str, float] | None:
+    eval_time = 0.0  # seconds spent in evaluation, reported apart from training time
+
+    def save_artifacts(run, log, step: int) -> None:
+        artifacts = evaluator.artifacts(model, test_batch, step=step)
+        log_artifacts(run, artifacts, step)
+        log.info(f"saved {len(artifacts)} eval artifact(s) at step {step}")
+
+    def evaluate(run, log, step: int, artifacts_off_schedule: bool = False) -> dict[str, float] | None:
         """Scalars and artifacts for `step`; both read one shared EvalContext.
 
         Returns the scalar metrics when this step is on the scalar schedule, so the
         loop can test the early-stopping criterion without a second forward pass.
-        If `force` is True, the evaluation is done even if this step is not on the schedule.
+        `artifacts_off_schedule` saves artifacts at a step the schedule skips (an
+        early stop's final weights) and computes nothing else.
         """
+        nonlocal eval_time
+        if device == "cuda":
+            torch.cuda.synchronize()  # don't bill queued training kernels to evaluation
+        t = time.perf_counter()
         metrics = None
-        if step in eval_steps and not force:
-            metrics = evaluator.scalars(model, test_batch, step=step)
-            run.track_metric(step, **metrics)
-            log.info(format_metrics(step, total_steps, metrics, log_metrics))
-        if step in artifact_steps or force:
-            artifacts = evaluator.artifacts(model, test_batch, step=step)
-            log_artifacts(run, artifacts, step)
-            log.info(f"saved {len(artifacts)} eval artifact(s) at step {step}")
+        if artifacts_off_schedule:
+            if track_artifacts and step not in artifact_steps:
+                save_artifacts(run, log, step)
+        else:
+            if step in eval_steps:
+                metrics = evaluator.scalars(model, test_batch, step=step)
+                run.track_metric(step, **metrics)
+                log.info(format_metrics(step, total_steps, metrics, log_metrics))
+            if step in artifact_steps:
+                save_artifacts(run, log, step)
+        eval_time += time.perf_counter() - t
         return metrics
 
     # ---- the run ----
@@ -112,6 +131,8 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
         log.info(batch_stats.summary())
         log.info(f"Configuration:\n{OmegaConf.to_yaml(cfg)}")
 
+        if device == "cuda":
+            torch.cuda.reset_peak_memory_stats()
         step, stopped, t0 = 0, False, time.perf_counter()
         try:
             for step in range(total_steps):
@@ -125,7 +146,7 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
                 if stop_at is not None and metrics is not None and metrics.get("top1_accuracy", 0.0) >= stop_at:
                     log.info(f"early stop at step {step}: top1_accuracy={metrics['top1_accuracy']:.4f} >= {stop_at}")
                     stopped = True
-                    _ = evaluate(run, log, step, force=True)  # final weights, if the schedule asks for them
+                    evaluate(run, log, step, artifacts_off_schedule=True)  # final weights
                     break
                 loss = compute_loss(model, generate_icl_batch(B, V, L, K, stats=False, device=gen_device),
                             loss_fn, device)
@@ -147,11 +168,21 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
             # Last line of the log whatever happened: normal end, early stop, divergence,
             # KeyboardInterrupt or crash. `finally` runs before the exception propagates.
             elapsed = time.perf_counter() - t0
+            train_time = elapsed - eval_time
+            ms_per_step = 1000 * train_time / max(step, 1)
+            peak_gib = torch.cuda.max_memory_allocated() / 2**30 if device == "cuda" else float("nan")
             log.info(
-                f"elapsed time = ({elapsed / 60:.2f} min) = ({elapsed/3600:.2f} hr)"
-                f"for {step} steps ({1000 * elapsed / max(step, 1):.1f} ms/step) = ({elapsed / max(step, 1):.4f} s/step)"
+                f"elapsed time = ({elapsed / 60:.2f} min) = ({elapsed/3600:.2f} hr) for {step} steps: "
+                f"train {train_time / 60:.2f} min ({ms_per_step:.1f} ms/step), eval {eval_time / 60:.2f} min | "
+                f"peak GPU memory {peak_gib:.2f} GiB"
             )
-
+            run.track_results(
+                elapsed_time=elapsed,
+                train_time=train_time,
+                eval_time=eval_time,
+                steps_completed=step,
+                ms_per_step=ms_per_step,
+                peak_gpu_mem_gib=peak_gib)
 
 def main():
     cfg = load_config()

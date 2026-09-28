@@ -40,6 +40,8 @@ def build_controller(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -
     precision_msg = set_matmul_precision(cfg.extra_args.matmul_precision)
 
     # ---- model, loss, optimizer ----
+    if cfg.model_args.backend != "full":
+        raise ValueError("scripts/launcher.py runs the full model only; use scripts/train.py for backend='reduced'")
     model = MinimalTransformer(cfg.model_args).to(device)
     model.initialize_model()
     loss_fn = torch.nn.CrossEntropyLoss()
@@ -49,8 +51,8 @@ def build_controller(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -
     test_batch, batch_stats = preprocess_batch(generate_icl_batch(TB, V, L, K, device=gen_device), device)
     evaluator = Evaluator(
         scalars=[TopKAccuracy(1), LossMetric()],
-        artifacts=[ComposedMatrices(), PerPositionOnOffLogits()],
-        loss_fn=loss_fn,
+        artifacts=[ComposedMatrices(), PerPositionOnOffLogits(cfg.extra_args.logit_positions)],
+        chunk=cfg.extra_args.eval_chunk or B,
     )
 
     # ---- the three closures Rewind drives ----

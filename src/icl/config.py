@@ -20,6 +20,11 @@ class ModelArgs:
     mask1: str = "causal"  # Layer-1 mask: "causal" (j < i) or "prev" (j == i-1 only)
     mask2: str = "causal"  # Layer-2 mask: "causal" (j < i) or "prev" (j == i-1 only)
     dropout: float = 0.0  # Dropout rate
+    # "full": MinimalTransformer with d x d weights. "reduced": the same model trained by SGD
+    # in the (M, Q, G) coordinates the loss depends on (icl.reduced) -- exact, cost independent of d.
+    backend: str = "full"
+    init: str = "full"  # reduced only: "full" (compose a MinimalTransformer: same draw) or "sample" (any d)
+    infinite_d: bool = False  # reduced + init="sample" only: take d_model -> inf (d_model is then ignored)
 
 
 @dataclass
@@ -69,6 +74,9 @@ class ExtraArgs:
     base_dir : str | None = "./data"  # Base directory for data storage
     launch_token: str | None = None  # Set by rewind.RunLauncher (dashboard); used for the run_id handshake
     log_to_terminal: bool = False  # Whether to print metrics to terminal
+    eval_chunk: int | None = None  # Test sequences per evaluation forward pass (None = data_args.batch_size)
+    # Positions saved by the per-position logits artifact, as fractions of L: f -> position ceil(f*L)-1
+    logit_positions: list[float] = field(default_factory=lambda: [0.5, 0.75, 1.0])
    
 
 
