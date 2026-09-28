@@ -177,8 +177,13 @@ class MinimalTransformer(nn.Module):
 
       U = self.unembed.U.weight  # shape (V, d)
 
+      M = P.T @ WQK1 @ P # shape (L, L)
+      # Apply the corresponding mask to the first layer scores (i.e. M)
+
+      M = M.masked_fill(~self.attn1.mask, 0.0)
+
       composed_matrices = {
-          ("M","matrices"): P.T @ WQK1 @ P,  # shape (L, L)
+          ("M","matrices"): M,  # shape (L, L)
           ("Q","matrices"): E.T @ WQK2 @ WOV1 @ E,  # shape (V, V)
           ("G","matrices"): U @ WOV2 @ E # shape (V, V)
       }

@@ -81,18 +81,19 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
         artifact_steps = set()
     log_metrics = log_metrics or ["loss", "top1_accuracy"]
 
-    def evaluate(run, log, step: int) -> dict[str, float] | None:
+    def evaluate(run, log, step: int, force:bool=False) -> dict[str, float] | None:
         """Scalars and artifacts for `step`; both read one shared EvalContext.
 
         Returns the scalar metrics when this step is on the scalar schedule, so the
         loop can test the early-stopping criterion without a second forward pass.
+        If `force` is True, the evaluation is done even if this step is not on the schedule.
         """
         metrics = None
-        if step in eval_steps:
+        if step in eval_steps and not force:
             metrics = evaluator.scalars(model, test_batch, step=step)
             run.track_metric(step, **metrics)
             log.info(format_metrics(step, total_steps, metrics, log_metrics))
-        if step in artifact_steps:
+        if step in artifact_steps or force:
             artifacts = evaluator.artifacts(model, test_batch, step=step)
             log_artifacts(run, artifacts, step)
             log.info(f"saved {len(artifacts)} eval artifact(s) at step {step}")
@@ -124,6 +125,7 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
                 if stop_at is not None and metrics is not None and metrics.get("top1_accuracy", 0.0) >= stop_at:
                     log.info(f"early stop at step {step}: top1_accuracy={metrics['top1_accuracy']:.4f} >= {stop_at}")
                     stopped = True
+                    _ = evaluate(run, log, step, force=True)  # final weights, if the schedule asks for them
                     break
                 loss = compute_loss(model, generate_icl_batch(B, V, L, K, stats=False, device=gen_device),
                             loss_fn, device)
@@ -155,7 +157,7 @@ def main():
     cfg = load_config()
     cfg.extra_args.seed, seed_msg = set_seed(cfg.extra_args.seed)
     print(seed_msg)
-    train(cfg,log_to_terminal=True)
+    train(cfg,log_to_terminal=cfg.extra_args.log_to_terminal)
 
 
 if __name__ == "__main__":

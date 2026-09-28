@@ -19,15 +19,15 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------- knobs
-EXP="${EXP:-scaling_sweep}"          # TrackLab experiment; all runs land together
-SEEDS=(${SEEDS:-1 2})              # >= 3 seeds per configuration
+EXP="${EXP:-large_d_sweep_1}"          # TrackLab experiment; all runs land together
+SEEDS=(${SEEDS:-1})              # >= 3 seeds per configuration
 JOBS="${JOBS:-1}"                    # concurrent runs; the model is tiny, one GPU fits several
 ALPHA_STEPS="${ALPHA_STEPS:-30}"     # budget = ALPHA_STEPS x predicted T* (icl.config.predicted_learning_time)
 STOP_ACC="${STOP_ACC:-0.75}"         # early-exit threshold on in-context accuracy
 N_PRINTS="${N_PRINTS:-400}"          # T* resolution = total_steps / N_PRINTS (~0.3% of budget)
-SWEEPS="${SWEEPS:-base L V d}"       # which sub-sweeps to include
+SWEEPS="${SWEEPS:-base L}"       # which sub-sweeps to include
 ALPHA_LR="${ALPHA_LR:-3500}"        # learning rate for all runs; the grid is in the sweep axes
-MASK_1="${MASK_1:-prev}"             # mask for the first attention layer (prev or causal)
+MASK_1="${MASK_1:-causal}"             # mask for the first attention layer (prev or causal)
 ALPHA_BATCH="${ALPHA_BATCH:-1500}"         # batch size for all runs; the grid is in the sweep axes
 BATCH_SIZE="${BATCH_SIZE:-512}"         # override alpha_batch 
 # Measured on the A100 workstation 2026-09-21, at the baseline V=128 L=128 d=512:
@@ -36,7 +36,7 @@ BATCH_SIZE="${BATCH_SIZE:-512}"         # override alpha_batch
 # TF32 makes the GPU step so cheap that CPU sampling becomes the critical path, so
 # generation moves back onto the GPU and concurrency stops paying. JOBS=1 is best or
 # tied-best at every d measured. See shell/tf32_ab.sh for the T* validation of TF32.
-GEN_DEVICE="${GEN_DEVICE:-cuda}"     # batch sampling device: "cpu", "cuda", "auto" (= training device)
+GEN_DEVICE="${GEN_DEVICE:-cpu}"     # batch sampling device: "cpu", "cuda", "auto" (= training device)
 MATMUL_PRECISION="${MATMUL_PRECISION:-high}"  # "highest" = true fp32, "high" = TF32 (2.2-3.8x at d>=512)
 DRY_RUN="${DRY_RUN:-0}"             
 read -r -a PY_CMD <<< "${PY:-uv run python}"
@@ -44,8 +44,8 @@ read -r -a PY_CMD <<< "${PY:-uv run python}"
 # ---------------------------------------------------------------- the grid
 # Baseline is V=128 L=128 d=256; each sub-sweep varies one axis and omits the
 # baseline point, which is run once below. Keep this identical to leonardo_sweep.sh.
-BASE_V=128; BASE_L=128; BASE_D=512
-SWEEP_L=(64 256 512 1024)
+BASE_V=128; BASE_L=128; BASE_D=2048
+SWEEP_L=(32 64 256 512)
 SWEEP_V=(32 64 256 512)
 SWEEP_D=(64 128 512 1024)
 
@@ -96,7 +96,6 @@ launch() {
         extra_args.alpha_steps="$ALPHA_STEPS"
         extra_args.stop_at_accuracy="$STOP_ACC"
         extra_args.n_prints="$N_PRINTS"
-        extra_args.track_artifacts=false
         extra_args.experiment_name="$EXP"
         extra_args.seed="$seed"
         optim_args.alpha_lr="$ALPHA_LR"

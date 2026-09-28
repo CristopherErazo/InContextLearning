@@ -26,7 +26,7 @@ class ModelArgs:
 class DataArgs:
     alpha_batch: float = 1000.0  # Scaling factor for batch size ~1/(L * frac_solvable)
     batch_size: int | None = field(default=None)  # Batch size (computed from alpha_batch) if given, overrides alpha_batch
-    test_size: int = 256  # Number of samples in test set
+    test_size: int = 1024  # Number of samples in test set
     rho: float = 0.2  # Fraction of trigger tokens = K/vocab_size
     gen_device: str = "auto"  # Where batches are sampled: "cpu", "cuda", or "auto" (= training device)
     # Computed Values as placeholders; will be computed later
@@ -56,7 +56,7 @@ class ExtraArgs:
     total_steps: int = field(default=1000)  # Total number of training steps
     stop_at_accuracy: float | None = None  # Stop once top1_accuracy reaches this (None = never)
     n_prints: int = 75  # Metric evaluation frequency
-    n_prints_model: int = 75  # Model checkpoint frequency
+    n_prints_model: int = 20  # Model checkpoint frequency
     print_scale: str = 'linear'  # Scale for evaluation: log or linear
     experiment_name: str | None  = 'icl' # Experiment tracking name
     seed: int | None = 42      # Random seed
@@ -65,9 +65,10 @@ class ExtraArgs:
     matmul_precision: str = "highest"
     enable_control: bool = False  # Enable control features
     enable_rewind: bool = False  # Enable rewind features
-    track_artifacts: bool = False
+    track_artifacts: bool = True
     base_dir : str | None = "./data"  # Base directory for data storage
     launch_token: str | None = None  # Set by rewind.RunLauncher (dashboard); used for the run_id handshake
+    log_to_terminal: bool = False  # Whether to print metrics to terminal
    
 
 

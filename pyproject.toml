@@ -47,7 +47,7 @@ conflicts = [
 # Sibling libraries by the same author, not on PyPI. Pinned to GitHub so that
 # a fresh clone needs no local checkouts. To move to a newer version, change
 # the tag / rev here and run `uv lock --upgrade-package <name>`.
-tracklab = { git = "https://github.com/CristopherErazo/TrackLab", tag = "v1.1.0" }
+tracklab = { git = "https://github.com/CristopherErazo/TrackLab", tag = "v2.0.0" }
 rewind = { git = "https://github.com/CristopherErazo/Rewind", tag = "v1.0.0" }
 torch = [
     { index = "pytorch-cpu", extra = "cpu" },
