@@ -1,109 +1,116 @@
 #!/usr/bin/env bash
-# Scaling sweep on a single workstation GPU: a consistency check for the same grid
-# that shell/leonardo_sweep.sh runs on the cluster. Same configurations, same seeds,
-# same per-run overrides -- only the scheduling differs (a plain loop here, a SLURM
-# job array there), so the two are directly comparable.
+# L sweep at several embedding dimensions, including d = inf, on a single workstation GPU.
+#
+# Uses the reduced backend (icl.reduced): SGD in the (M, Q, G) coordinates, exact for
+# this model, with a step cost independent of d. Finite d is drawn from the full
+# model's init law (init=sample, needs d >= max(L, V)); d=inf is the exact limit
+# (every Gram matrix = I). See size_scaling.md. BACKEND=full runs the original
+# MinimalTransformer instead (d x d weights; finite d only).
 #
 # Every run stops at the first evaluation with top1_accuracy >= STOP_ACC; that step is
 # the measured learning time T*.
 #
 #   bash shell/workstation_sweep.sh              # run it
 #   DRY_RUN=1 bash shell/workstation_sweep.sh    # print the plan and exit
-#   JOBS=3 bash shell/workstation_sweep.sh       # 3 runs at a time on the GPU
-#   SWEEPS="L" bash shell/workstation_sweep.sh   # only the L sweep (any of L V d, plus base)
+#   SEEDS="1 2 3" bash shell/workstation_sweep.sh
+#   DS="inf" LS="64 128" bash shell/workstation_sweep.sh   # a sub-grid
+#   BACKEND=full EXP=L_sweep_full DS=2048 LS="64 128 256 512" bash shell/workstation_sweep.sh
 #
 # Run from the repo root.
 
-# SWEEPS="base L" EXP="sweep_L1_constrained" DRY_RUN=1 nohup bash shell/workstation_sweep.sh > ./logs/sweep.log 2>&1 &
+# nohup bash shell/workstation_sweep.sh > ./logs/L_sweep_reduced.log 2>&1 &
 
 set -euo pipefail
 
 # ---------------------------------------------------------------- knobs
-EXP="${EXP:-large_d_sweep_1}"          # TrackLab experiment; all runs land together
-SEEDS=(${SEEDS:-1})              # >= 3 seeds per configuration
-JOBS="${JOBS:-1}"                    # concurrent runs; the model is tiny, one GPU fits several
-ALPHA_STEPS="${ALPHA_STEPS:-30}"     # budget = ALPHA_STEPS x predicted T* (icl.config.predicted_learning_time)
-STOP_ACC="${STOP_ACC:-0.75}"         # early-exit threshold on in-context accuracy
-N_PRINTS="${N_PRINTS:-400}"          # T* resolution = total_steps / N_PRINTS (~0.3% of budget)
-SWEEPS="${SWEEPS:-base L}"       # which sub-sweeps to include
-ALPHA_LR="${ALPHA_LR:-3500}"        # learning rate for all runs; the grid is in the sweep axes
-MASK_1="${MASK_1:-causal}"             # mask for the first attention layer (prev or causal)
-ALPHA_BATCH="${ALPHA_BATCH:-1500}"         # batch size for all runs; the grid is in the sweep axes
-BATCH_SIZE="${BATCH_SIZE:-512}"         # override alpha_batch 
-# Measured on the A100 workstation 2026-09-21, at the baseline V=128 L=128 d=512:
-#   tf32 off, gen cpu   5.00 ms/step      tf32 on, gen cpu    5.00 -> jobs=2: 3.80 agg
-#   tf32 on,  gen cuda  3.70 ms/step      tf32 on, gen cuda -> jobs=2: 4.05 agg
-# TF32 makes the GPU step so cheap that CPU sampling becomes the critical path, so
-# generation moves back onto the GPU and concurrency stops paying. JOBS=1 is best or
-# tied-best at every d measured. See shell/tf32_ab.sh for the T* validation of TF32.
-GEN_DEVICE="${GEN_DEVICE:-cpu}"     # batch sampling device: "cpu", "cuda", "auto" (= training device)
-MATMUL_PRECISION="${MATMUL_PRECISION:-high}"  # "highest" = true fp32, "high" = TF32 (2.2-3.8x at d>=512)
-DRY_RUN="${DRY_RUN:-0}"             
+EXP="${EXP:-L_sweep_reduced_Vlarge}"           # TrackLab experiment; all runs land together
+SEEDS=(${SEEDS:-1})                     # >= 3 seeds per configuration for the fits
+LS=(${LS:-64 128 256 512})         # sequence lengths
+DS=(${DS:-2048 4096 inf})               # embedding dimensions; "inf" = the d -> inf limit
+V="${V:-256}"                           # vocabulary size (fixed in this sweep)
+BACKEND="${BACKEND:-reduced}"           # "reduced" (icl.reduced) or "full" (MinimalTransformer)
+INIT="${INIT:-sample}"                  # reduced only: "sample" (any d, inf) or "full" (full model's exact draw)
+JOBS="${JOBS:-1}"                       # concurrent runs; 1 is fastest once the GPU is busy
+ALPHA_STEPS="${ALPHA_STEPS:-30}"        # budget = ALPHA_STEPS x predicted T* (icl.config.predicted_learning_time);
+                                        # measured T* is ~4x the prediction at L=64, so keep headroom
+STOP_ACC="${STOP_ACC:-0.75}"            # early-exit threshold on in-context accuracy
+N_PRINTS="${N_PRINTS:-3000}"            # T* resolution = total_steps / N_PRINTS (1% of predicted T*);
+                                        # evaluations stop at T*, so a dense schedule stays cheap
+N_PRINTS_MODEL="${N_PRINTS_MODEL:-2}"   # artifact snapshots: 2 = the initial model (step 0) and the final one
+                                        # (the early-stop step T*, or total_steps if the budget runs out)
+ALPHA_LR="${ALPHA_LR:-3500}"            # eta_0 = lr * d for all runs
+MASK_1="${MASK_1:-causal}"              # mask for the first attention layer (prev or causal)
+BATCH_SIZE="${BATCH_SIZE:-512}"         # fixed batch size (overrides alpha_batch)
+TEST_SIZE="${TEST_SIZE:-4096}"          # test sequences; evaluation runs in chunks of BATCH_SIZE
+GEN_DEVICE="${GEN_DEVICE:-auto}"        # batch sampling device: "cpu", "cuda", "auto" (= training device)
+MATMUL_PRECISION="${MATMUL_PRECISION:-high}"  # "highest" = true fp32, "high" = TF32
+DRY_RUN="${DRY_RUN:-0}"
 read -r -a PY_CMD <<< "${PY:-uv run python}"
 
-# ---------------------------------------------------------------- the grid
-# Baseline is V=128 L=128 d=256; each sub-sweep varies one axis and omits the
-# baseline point, which is run once below. Keep this identical to leonardo_sweep.sh.
-BASE_V=128; BASE_L=128; BASE_D=2048
-SWEEP_L=(32 64 256 512)
-SWEEP_V=(32 64 256 512)
-SWEEP_D=(64 128 512 1024)
+# Measured on the A100 (reduced backend, V=128, B=512, TF32), per training step:
+#   L=128  4.7 ms  0.3 GiB | L=256 9.7 ms 0.6 GiB | L=512 17 ms 1.8 GiB | L=1024 50 ms 5.5 GiB
+# The same at every d, so the d=2048, 4096 and inf rows cost the same.
 
-# SWEEP_L=(512 1024)
-# SWEEP_V=(512 1024)
-# SWEEP_D=(1024 2048)
-
-# A sub-sweep may contain the baseline value on its own axis (SWEEP_D holds 512 and
-# BASE_D is 512), which would run that point twice under the same seeds and give it
-# double weight in the scaling fit. Append only new points.
-CONFIGS=()
-add_config() {
-    local c="$1" existing
-    for existing in ${CONFIGS[@]+"${CONFIGS[@]}"}; do
-        [[ "$existing" == "$c" ]] && return 0
-    done
-    CONFIGS+=("$c")
-}
-for s in $SWEEPS; do
-    case "$s" in
-        base) add_config "$BASE_V $BASE_L $BASE_D" ;;
-        L)    for L in "${SWEEP_L[@]}"; do add_config "$BASE_V $L $BASE_D"; done ;;
-        V)    for V in "${SWEEP_V[@]}"; do add_config "$V $BASE_L $BASE_D"; done ;;
-        d)    for D in "${SWEEP_D[@]}"; do add_config "$BASE_V $BASE_L $D"; done ;;
-        *)    echo "unknown sweep '$s' (expected: base L V d)" >&2; exit 1 ;;
-    esac
-done
-
-n_runs=$(( ${#CONFIGS[@]} * ${#SEEDS[@]} ))
+n_runs=$(( ${#DS[@]} * ${#LS[@]} * ${#SEEDS[@]} ))
 echo "experiment : $EXP"
-echo "configs    : ${#CONFIGS[@]}   seeds: ${SEEDS[*]}   runs: $n_runs   concurrency: $JOBS"
-echo "budget     : alpha_steps=$ALPHA_STEPS   stop_at_accuracy=$STOP_ACC   n_prints=$N_PRINTS"
-echo "numerics   : matmul_precision=$MATMUL_PRECISION   gen_device=$GEN_DEVICE   mask1=$MASK_1"
+echo "grid       : d in (${DS[*]}) x L in (${LS[*]}) at V=$V   seeds: ${SEEDS[*]}   runs: $n_runs   concurrency: $JOBS"
+echo "budget     : alpha_steps=$ALPHA_STEPS   stop_at_accuracy=$STOP_ACC   n_prints=$N_PRINTS   n_prints_model=$N_PRINTS_MODEL"
+echo "data       : batch_size=$BATCH_SIZE   test_size=$TEST_SIZE   gen_device=$GEN_DEVICE"
+echo "model      : backend=$BACKEND$([[ "$BACKEND" == reduced ]] && echo "   init=$INIT")"
+echo "numerics   : matmul_precision=$MATMUL_PRECISION   alpha_lr=$ALPHA_LR   mask1=$MASK_1"
 echo
+
+# Fail before launching anything rather than midway: d = inf exists only in the reduced
+# backend with init=sample, and init=sample needs d >= max(L, V).
+if [[ "$BACKEND" != reduced && "$BACKEND" != full ]]; then
+    echo "BACKEND must be 'reduced' or 'full', got '$BACKEND'" >&2; exit 1
+fi
+for D in "${DS[@]}"; do
+    if [[ "$D" == inf ]]; then
+        if [[ "$BACKEND" != reduced || "$INIT" != sample ]]; then
+            echo "d=inf needs BACKEND=reduced INIT=sample" >&2; exit 1
+        fi
+        continue
+    fi
+    [[ "$BACKEND" == reduced && "$INIT" == sample ]] || continue
+    for L in "${LS[@]}"; do
+        if (( D < L || D < V )); then
+            echo "d=$D < max(L=$L, V=$V): init=sample cannot draw it (use backend=full)" >&2; exit 1
+        fi
+    done
+done
 
 LOG_DIR="logs/$EXP"
 mkdir -p "$LOG_DIR"
 
 # ---------------------------------------------------------------- run
 launch() {
-    local V=$1 L=$2 D=$3 seed=$4
+    local L=$1 D=$2 seed=$3
     local tag="V${V}_L${L}_d${D}_s${seed}"
+    local model_args_=(model_args.backend="$BACKEND")
+    [[ "$BACKEND" == reduced ]] && model_args_+=(model_args.init="$INIT")
+    if [[ "$D" == inf ]]; then
+        model_args_+=(model_args.infinite_d=true)
+    else
+        model_args_+=(model_args.d_model="$D")
+    fi
     local args=(
         -u scripts/train.py
+        "${model_args_[@]}"
         model_args.vocab_size="$V"
         model_args.seq_len="$L"
-        model_args.d_model="$D"
+        model_args.mask1="$MASK_1"
+        data_args.batch_size="$BATCH_SIZE"
+        data_args.test_size="$TEST_SIZE"
+        data_args.gen_device="$GEN_DEVICE"
+        optim_args.alpha_lr="$ALPHA_LR"
         extra_args.alpha_steps="$ALPHA_STEPS"
         extra_args.stop_at_accuracy="$STOP_ACC"
         extra_args.n_prints="$N_PRINTS"
+        extra_args.n_prints_model="$N_PRINTS_MODEL"
+        extra_args.matmul_precision="$MATMUL_PRECISION"
         extra_args.experiment_name="$EXP"
         extra_args.seed="$seed"
-        optim_args.alpha_lr="$ALPHA_LR"
-        model_args.mask1="$MASK_1"
-        data_args.alpha_batch="$ALPHA_BATCH"
-        data_args.gen_device="$GEN_DEVICE"
-        extra_args.matmul_precision="$MATMUL_PRECISION"
-        data_args.batch_size="$BATCH_SIZE"
     )
     if [[ "$DRY_RUN" == "1" ]]; then
         echo "${PY_CMD[*]} ${args[*]}"
@@ -111,26 +118,28 @@ launch() {
     fi
     echo "[$(date '+%F %T')] start $tag"
     "${PY_CMD[@]}" "${args[@]}" > "$LOG_DIR/$tag.log" 2>&1 \
-        && echo "[$(date '+%F %T')] done  $tag  -> $(grep -c . "$LOG_DIR/$tag.log") log lines" \
+        && echo "[$(date '+%F %T')] done  $tag" \
         || echo "[$(date '+%F %T')] FAIL  $tag  (see $LOG_DIR/$tag.log)"
 }
 
-for cfg in "${CONFIGS[@]}"; do
-    read -r V L D <<< "$cfg"
-    for seed in "${SEEDS[@]}"; do
-        if [[ "$DRY_RUN" == "1" || "$JOBS" -le 1 ]]; then
-            launch "$V" "$L" "$D" "$seed" "$"
-        else
-            # keep at most $JOBS runs in flight
-            while (( $(jobs -rp | wc -l) >= JOBS )); do wait -n; done
-            launch "$V" "$L" "$D" "$seed" &
-        fi
+for seed in "${SEEDS[@]}"; do
+    for D in "${DS[@]}"; do
+        for L in "${LS[@]}"; do
+            if [[ "$DRY_RUN" == "1" || "$JOBS" -le 1 ]]; then
+                launch "$L" "$D" "$seed"
+            else
+                # keep at most $JOBS runs in flight
+                while (( $(jobs -rp | wc -l) >= JOBS )); do wait -n; done
+                launch "$L" "$D" "$seed" &
+            fi
+        done
     done
 done
 wait
 
 echo
 echo "sweep finished: $(date '+%F %T')"
-echo "runs in data/$EXP/ ; per-run logs in $LOG_DIR/"
-echo "T* = the step reported on the 'early stop at step N' line of each log:"
-echo "  grep -H 'early stop at step' $LOG_DIR/*.log"
+echo "runs in data/$EXP/ (each run's config.json has seq_len / d_model / infinite_d); per-run stdout in $LOG_DIR/"
+echo "T* = the step on the 'early stop at step N' line of each run's info.log; runs that end with"
+echo "'training done' never reached STOP_ACC within the budget (raise ALPHA_STEPS):"
+echo "  grep -H 'early stop at step\|training done' data/$EXP/run_*/logs/info.log"
