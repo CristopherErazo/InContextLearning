@@ -74,5 +74,5 @@ uv run shiny run --reload scripts/dash.py
 nohup bash shell/submit.sh > submit.log &
 ```
 
-Run outputs go to `data/<experiment_name>/run_NNN/` (gitignored). Notebooks in
-`notebooks/` read them back with `tracklab.ExperimentReader(exp, base_dir='../data')`.
+Run outputs go to `data/<experiment_name>/run_NNN/` (gitignored). The
+`notebooks/template.ipynb` notebook reads them back with `tracklab.ExperimentReader(exp, base_dir='../data')`.

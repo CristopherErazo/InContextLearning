@@ -31,12 +31,10 @@ uv run shiny run --reload scripts/dash.py
 
 # cluster sweep: edit the arrays at the top, then
 nohup bash shell/submit.sh > submit.log &
-bash shell/monitor.sh 0.5 30              # kills the current launcher once top1_accuracy > threshold
 
 # module self-checks (each has an __main__ block)
 uv run python -m icl.data
 uv run python -m icl.model
-uv run python -u scripts/bench_data.py --step   # loop vs vectorised sampler, CPU vs CUDA
 
 uv run pytest                             # tests/ holds the data-generator checks (testpaths=tests)
 ```
@@ -106,8 +104,8 @@ the chain's stationary law, which is exactly weight `2/(V+K)` on output tokens a
 `1/(V+K)` elsewhere. `stats=False` returns only `sequence` / `K` / `output_set`
 and skips the `counts` work; training passes it, evaluation does not.
 `device=` draws the batch there directly and `data_args.gen_device` (`"cpu"`, `"cuda"`
-or `"auto"` = the training device, the default) is what the scripts pass — measure
-with `scripts/bench_data.py` before changing it. On the A100 workstation the
+or `"auto"` = the training device, the default) is what the scripts pass — benchmark
+CPU vs CUDA (`scripts/bench_data.py`, kept on the `code-optimization` branch) before changing it. On the A100 workstation the
 vectorised generator is 2–35x faster on CUDA than on CPU and never loses a train
 step, which is why the default is no longer `"cpu"`. Passing a `torch.Generator` gives a
 reproducible stream independent of the global seed.
@@ -222,7 +220,14 @@ batch size, which needs less memory than a training step) to the `Evaluator`.
 `track_results` records `train_time` and `eval_time` separately, `ms_per_step` of
 training alone, and `peak_gpu_mem_gib`.
 
-**Notebooks.** Named `YY_MM_DD_Topic.ipynb`; they read runs back with
+**Branches.** `main` is kept lean: `src/`, `tests/`, `scripts/{train,launcher,dash}.py`,
+`shell/{submit,train,workstation_sweep,cluster_status,leonardo_sweep}.sh` and only
+`notebooks/template.ipynb`. `code-optimization` is the archive with the full history of
+dated notebooks, benchmarks and extra shell helpers; `new-ansatz` is the active
+development branch, created from `main`.
+
+**Notebooks.** Only `template.ipynb` lives on `main`; dated ones are named
+`YY_MM_DD_Topic.ipynb` (see `code-optimization`). They read runs back with
 `tracklab.ExperimentReader(experiment_name, base_dir='../data')`. Several still import
 a `configurations` plotting package that was removed from this repo (the author intends
 to move it into `~/research/lib/`); expect those cells to fail until that lands.
