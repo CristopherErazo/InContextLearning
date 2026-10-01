@@ -115,7 +115,7 @@ def test_infinite_d():
     loss = compute_loss(model, generate_icl_batch(8, 24, 20, K, stats=False), torch.nn.CrossEntropyLoss(), "cpu")
     loss.backward()
     opt.step()
-    assert all(torch.isfinite(t).all() for t in model.normalized_matrices().values())
+    assert all(torch.isfinite(t).all() for t in model.get_composed_matrices().values())
 
 
 def test_chunked_evaluation_matches_one_pass():

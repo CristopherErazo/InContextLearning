@@ -14,7 +14,7 @@ from .evaluator import EvalContext, split_on_off
 
 
 class ComposedMatrices:
-    """M = Pᵀ WQK1 P, Q = Eᵀ WQK2 WOV1 E, G = U WOV2 E, one .npy each."""
+    """M = Pᵀ WQK1 P / √d, Q = Eᵀ WQK2 WOV1 E / √d, G = U WOV2 E / √d, one .npy each."""
 
     name, group = "matrices", "matrices"
 

@@ -12,7 +12,7 @@ MIN_TOTAL_STEPS = 100  # lower bound on a budget derived from extra_args.alpha_s
 class ModelArgs:
     vocab_size: int = 128 # Vocabulary size
     d_model: int = 256 # Model dimension
-    seq_len: int = 128 # Sequence length
+    seq_len: int = 256 # Sequence length
     lin_attn: bool = True  # Whether to use linear attention or not
     beta: float = 0.25  # Scaling factor for output logits
     sigma_0: float = 1.0  # Initial std dev for parameter initialization
@@ -77,7 +77,7 @@ class ExtraArgs:
     eval_chunk: int | None = None  # Test sequences per evaluation forward pass (None = data_args.batch_size)
     # Positions saved by the per-position logits artifact, as fractions of L: f -> position ceil(f*L)-1
     logit_positions: list[float] = field(default_factory=lambda: [0.5, 0.75, 1.0])
-   
+    
 
 
 @dataclass

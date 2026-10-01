@@ -164,7 +164,10 @@ class MinimalTransformer(nn.Module):
     return logits
 
   def get_composed_matrices(self) -> dict:
-    """Returns a dictionary of composed matrices for analysis."""
+    """Returns a dictionary of composed matrices for analysis, normalised by
+    sqrt(d) as in the paper (M = Pᵀ WQK1 P / √d, etc.), so that the logits are
+    beta / L * sum M Q G with no d left."""
+    s = math.sqrt(self.d_model)
     with torch.no_grad():
       E = self.embed.E.weight.T  # shape (d, V)
       P = self.embed.P.weight.T  # shape (d, L)
@@ -187,7 +190,7 @@ class MinimalTransformer(nn.Module):
           ("Q","matrices"): E.T @ WQK2 @ WOV1 @ E,  # shape (V, V)
           ("G","matrices"): U @ WOV2 @ E # shape (V, V)
       }
-      composed_matrices = {k: v.detach().cpu() for k, v in composed_matrices.items()}
+      composed_matrices = {k: (v / s).detach().cpu() for k, v in composed_matrices.items()}
     return composed_matrices
 
 

@@ -167,17 +167,9 @@ class EvalContext:
 
     @cached_property
     def matrices(self) -> dict[str, torch.Tensor]:
-        """Composed analysis matrices {"M", "Q", "G"} (on CPU), from the model."""
+        """Composed analysis matrices {"M", "Q", "G"} (on CPU), from the model,
+        normalised by sqrt(d): the O(1) objects the order parameters average."""
         return {name: m for (name, _group), m in self.model.get_composed_matrices().items()}
-
-    @cached_property
-    def normalized_matrices(self) -> dict[str, torch.Tensor]:
-        """{"M", "Q", "G"} divided by sqrt(d), the O(1) objects the order parameters
-        average. The reduced model stores them directly (finite at d = inf)."""
-        if hasattr(self.model, "normalized_matrices"):
-            return self.model.normalized_matrices()
-        s = self.model.d_model ** 0.5
-        return {name: m / s for name, m in self.matrices.items()}
 
     @property
     def E(self):    return self.model.embed.E.weight.T      # (d, V)

@@ -8,8 +8,7 @@ init. The logits depend on the weights only through the composed matrices
     Q = E WQK2ᵀ WOV1 Eᵀ    (V, V)
     G = U WOV2 Eᵀ          (V, V)
 
-(the same objects `MinimalTransformer.get_composed_matrices` returns), and one
-SGD step on the weights moves them *exactly* by
+and one SGD step on the weights moves them *exactly* by
 
     M <- M - eta K_P  dM K_P,     K_P = P Pᵀ
     Q <- Q - eta K_E  dQ K_R,     K_E = E Eᵀ,  K_R = E WOV1ᵀ WOV1 Eᵀ
@@ -19,7 +18,9 @@ with dM = dLoss/dM etc. Momentum and weight decay are linear in the weights, so
 they map across too; Adam is not, and needs the full model.
 
 Everything is stored normalised by sqrt(d): m = M/√d, q = Q/√d, g = G/√d and
-k = K/d. In those variables the forward pass has no d in it at all,
+k = K/d. (m, q, g) are the paper's M, Q, Gamma, and what
+`get_composed_matrices` returns for both backends. In those variables the
+forward pass has no d in it at all,
 
     A1     = mask1(m) / √L                  (L, L)
     H      = A1 @ onehot(x)                 (B, L, V)
@@ -170,17 +171,12 @@ class ReducedTransformer(nn.Module):
 
     # ---- analysis objects ----------------------------------------------------
 
-    def normalized_matrices(self) -> dict[str, torch.Tensor]:
-        """M/√d, Q/√d, G/√d on the CPU (M masked like the full model's). Finite at d = inf."""
-        with torch.no_grad():
-            return {"M": self.m.masked_fill(~self.mask1, 0.0).detach().cpu(),
-                    "Q": self.q.detach().cpu(), "G": self.g.detach().cpu()}
-
     def get_composed_matrices(self) -> dict:
-        """Same keys and scale as `MinimalTransformer.get_composed_matrices`.
-        At d = inf the unnormalised matrices diverge, so M/√d, Q/√d, G/√d are returned."""
-        s = 1.0 if math.isinf(self.d_model) else math.sqrt(self.d_model)
-        return {(name, "matrices"): s * mat for name, mat in self.normalized_matrices().items()}
+        """Same keys and scale as `MinimalTransformer.get_composed_matrices`:
+        m, q, g on the CPU (m masked like the full model's M). Finite at d = inf."""
+        with torch.no_grad():
+            mats = {"M": self.m.masked_fill(~self.mask1, 0.0), "Q": self.q, "G": self.g}
+            return {(name, "matrices"): mat.detach().cpu() for name, mat in mats.items()}
 
 
 class ReducedSGD(torch.optim.Optimizer):

@@ -69,7 +69,7 @@ class LogitStatistics:
 
 
 class MOrderParameters:
-    """Order parameters of `M = P^T WQK1 P`, whose active part is the strictly
+    """Order parameters of `M = P^T WQK1 P / sqrt(d)`, whose active part is the strictly
     lower triangle (a query attends only to j < i): `M_on` is the first
     sub-diagonal, `M_off` everything below it."""
 
@@ -77,7 +77,7 @@ class MOrderParameters:
     names = ("M_on", "M_off")
 
     def __call__(self, ctx: EvalContext) -> dict[str, float]:
-        M = ctx.normalized_matrices["M"]                         # (L, L), M / sqrt(d)
+        M = ctx.matrices["M"]                                    # (L, L)
         L = M.size(0)
         on = M.diagonal(-1).sum() / (L - 1)                      # M_{mu, mu-1}, mu = 2..L
         off = 2 * M.tril(-2).sum() / ((L - 1) * (L - 2))         # mu = 3..L, nu <= mu-2
@@ -85,14 +85,14 @@ class MOrderParameters:
 
 
 class QOrderParameters:
-    """Order parameters of `Q = E^T WQK2 WOV1 E`: the trigger diagonal, the
+    """Order parameters of `Q = E^T WQK2 WOV1 E / sqrt(d)`: the trigger diagonal, the
     off-diagonal trigger rows, and the non-trigger rows."""
 
     name = "Q_order_parameters"
     names = ("Q_on", "Q_T", "Q_noT")
 
     def __call__(self, ctx: EvalContext) -> dict[str, float]:
-        Q = ctx.normalized_matrices["Q"]                         # (V, V), Q / sqrt(d)
+        Q = ctx.matrices["Q"]                                    # (V, V)
         V = Q.size(0)
         trig, K = ctx.trigger_mask, ctx.K
         diag = Q.diagonal()
@@ -103,14 +103,14 @@ class QOrderParameters:
 
 
 class GammaOrderParameters:
-    """Order parameters of `Gamma = U WOV2 E`: the non-trigger diagonal, the
+    """Order parameters of `Gamma = U WOV2 E / sqrt(d)`: the non-trigger diagonal, the
     trigger rows, and the off-diagonal non-trigger rows."""
 
     name = "G_order_parameters"
     names = ("G_on", "G_T", "G_noT")
 
     def __call__(self, ctx: EvalContext) -> dict[str, float]:
-        G = ctx.normalized_matrices["G"]                         # (V, V), G / sqrt(d)
+        G = ctx.matrices["G"]                                    # (V, V)
         V = G.size(0)
         trig, K = ctx.trigger_mask, ctx.K
         diag = G.diagonal()

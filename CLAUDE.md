@@ -130,16 +130,16 @@ what the linear path already did. `initialize_model()` freezes everything
 and then unfreezes only `attn1.WQK`, `attn2.WQK`, `attn2.WOV`; E, P, U and `attn1.WOV`
 stay at random init. Logits are `beta * U(X2) / sqrt(d)`. `pred_mode="last"` runs
 layer 2 only for the final query. `get_composed_matrices()` returns the analysis
-objects `M = Pᵀ WQK1 P`, `Q = Eᵀ WQK2 WOV1 E`, `G = U WOV2 E`, keyed as
-`(name, "matrices")` tuples — that key shape is what TrackLab's artifact writer expects.
+objects normalised as in the paper, `M = Pᵀ WQK1 P / √d`, `Q = Eᵀ WQK2 WOV1 E / √d`,
+`G = U WOV2 E / √d` (logits `= beta/L Σ M Q G`), keyed as `(name, "matrices")` tuples — that key shape is what TrackLab's artifact writer expects.
 
 **Reduced backend (`src/icl/reduced.py`, `model_args.backend="reduced"`).** The same
 model trained by SGD, rewritten in the coordinates the loss depends on. The logits
 depend on the trained weights only through M (L×L), Q, G (V×V), and an SGD step on
 (WQK1, WQK2, WOV2) moves them exactly by `M -= eta K_P dM K_P`, `Q -= eta K_E dQ K_R`,
 `G -= eta K_U dG K_E`, with fixed Gram matrices `K_P = PPᵀ`, `K_E = EEᵀ`, `K_U = UUᵀ`,
-`K_R = E WOV1ᵀ WOV1 Eᵀ`. `ReducedTransformer` stores everything normalised
-(`m = M/√d`, `k = K/d`), which leaves no d in the forward pass: a step costs
+`K_R = E WOV1ᵀ WOV1 Eᵀ` (here M, Q, G are the unnormalised products). `ReducedTransformer` stores everything normalised
+(`m = M/√d`, `k = K/d`; m, q, g are the paper's M, Q, Γ), which leaves no d in the forward pass: a step costs
 O(B L² V) whatever d_model is, and `d = inf` is `k = I`. `ReducedSGD` applies the
 Gram-scaled step with `lr = eta_0 = alpha_lr` (momentum and weight decay map across
 exactly; Adam does not, so the backend refuses anything but SGD, and also
@@ -151,8 +151,8 @@ reproduced; the d×d weights have to fit once), and `"sample"` draws the Gram ma
 trajectories agree to 1e-9 in float64 and the sampled init has the full init's
 moments. Rerunning `large_d_sweep_1/run_005` (d=2048, L=512) with `init=full` gave
 the same early-stop step with metrics equal to ~1e-4 relative (TF32), at 25 vs 356
-ms/step. `get_composed_matrices()` returns the full model's M, Q, G (at d = inf, the
-normalised ones); `normalized_matrices()` returns M/√d etc. Only `scripts/train.py`
+ms/step. `get_composed_matrices()` returns m, q, g, the same objects and scale as the
+full model's (finite at d = inf). Only `scripts/train.py`
 builds it; `scripts/launcher.py` refuses `backend != "full"`.
 
 **Training helpers (`src/icl/training.py`).** `build_model(model_args, optim_args,
@@ -172,7 +172,7 @@ of `icl.evaluation`.
   `token_loss` (per-position cross-entropy, (B, L)) and `logits_ind` (logits at
   induction-possible positions, (N, V)); no (B, L, V) or (B, L, d) tensor outlives a
   chunk. `ind_index`, `target_ind`, `on/off_target_logits`, `matrices` (from
-  `model.get_composed_matrices`) and `normalized_matrices` (divided by √d) are
+  `model.get_composed_matrices`, already normalised by √d) are
   computed at most once and only if a probe asks. `outputs` / `attn1/2` are one
   UNCHUNKED `model.full_output` call, for probes that want the attention maps. A
   *probe* is any callable with a `name` taking an `EvalContext` (the `Probe` protocol).
@@ -184,12 +184,13 @@ of `icl.evaluation`.
   writes that dict to a TrackLab run (Rewind consumes the same dict directly).
 - `scalars.py`: scalar probes (`LossMetric`, `TopKAccuracy`, `TargetProbMass`,
   `LogitStatistics`, and the `M/Q/GammaOrderParameters`, which read
-  `normalized_matrices` so they also work at d = inf). Add new metrics here.
+  `matrices`, finite at d = inf). Add new metrics here.
 - `artifacts.py`: artifact probes; class attributes `group` (artifact subfolder) and
   `atype` (TrackLab serializer, default `tensor`). A dict result saves one artifact per
   key, so a probe that wants a single pickled dict returns `{self.name: payload}`
   (`PerPositionOnOffLogits` does this for `logits/hists_step_N.pkl`; `ComposedMatrices`
-  writes `matrices/{M,Q,G}_step_N.npy`). `PerPositionOnOffLogits(fractions)` saves only
+  writes `matrices/{M,Q,G}_step_N.npy`, normalised by √d; runs saved before this change
+  hold the unnormalised matrices at finite d, so divide those by √d). `PerPositionOnOffLogits(fractions)` saves only
   the positions `ceil(f*L) - 1` for `f` in `extra_args.logit_positions` (default
   `[0.5, 0.75, 1.0]`): the pickle is `{'fractions', 'positions', 'on', 'off', 'all'}`
   with one array per saved position. Runs before this change hold one array per
