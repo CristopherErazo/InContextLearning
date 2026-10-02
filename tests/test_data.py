@@ -32,17 +32,17 @@ def five_sigma(p: float, n: int) -> float:
 
 def test_keys_and_shapes():
     batch = gen()
-    assert set(batch) == {"sequence", "K", "output_set", "counts", "is_trigg"}
+    assert set(batch) == {"sequence", "K", "V", "output_set", "counts", "is_trigg"}
     assert batch["sequence"].shape == (B, L + 1)
     assert batch["counts"].shape == batch["is_trigg"].shape == (B, L)
     assert batch["output_set"].shape == (B, K)
-    assert batch["K"] == K
+    assert batch["K"] == K and batch["V"] == V
     assert "mask" not in batch, "the mask belongs to the model, not to the batch"
 
 
 def test_stats_false_skips_the_bookkeeping():
     batch = gen(stats=False)
-    assert set(batch) == {"sequence", "K", "output_set"}
+    assert set(batch) == {"sequence", "K", "V", "output_set"}
     # and gives the same sequences as stats=True for the same stream
     assert torch.equal(batch["sequence"], gen()["sequence"])
 

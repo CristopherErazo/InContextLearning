@@ -1,11 +1,10 @@
 """Test-batch preparation for evaluation.
 
-`generate_icl_batch` gives raw sequences plus the `is_trigg` / `counts`
-bookkeeping. Evaluation additionally needs to know at which positions the
-model *could* retrieve the answer from context ("induction possible": the
-input token is a trigger that has already appeared earlier in the sequence).
-`preprocess_batch` drops sequences where that never happens and attaches the
-`ind_possible` mask that `EvalContext` builds everything else from.
+The batch is NOT filtered: every sequence is kept, so the test batch is an
+unbiased sample of the task (the loss over all positions estimates the
+population loss, and the trigger queries with no earlier occurrence, ell = 0,
+keep their true frequency). Everything a probe needs (which positions are
+trigger queries, their ell) is derived from the sequences by `EvalContext`.
 """
 from __future__ import annotations
 
@@ -13,52 +12,32 @@ from dataclasses import dataclass
 
 import torch
 
+from ..data import occurrence_counts
+
 Batch = dict[str, torch.Tensor | int]
 
 
 @dataclass(frozen=True)
 class PreprocessStats:
-    """What `preprocess_batch` did to the batch, for logging."""
-    n_sequences: int          # sequences kept after filtering
-    frac_kept: float          # kept / generated
-    frac_ind_possible: float  # fraction of (sequence, position) pairs where induction is possible
+    """What the test batch holds, for logging."""
+    n_sequences: int          # sequences in the batch
+    frac_trigger: float       # fraction of positions holding a trigger query
+    frac_in_context: float    # fraction of positions holding a trigger query with ell >= 1
 
     def summary(self) -> str:
-        return (f"test batch: {self.n_sequences} sequences kept ({self.frac_kept:.1%}); "
-                f"induction possible at {self.frac_ind_possible:.1%} of positions")
-
-
-def induction_mask(batch: Batch) -> torch.Tensor:
-    """(B, L) bool: input token is a trigger that already occurred earlier."""
-    return batch["is_trigg"].bool() & (batch["counts"] > 1)
-
-
-def filter_batch(batch: Batch, device: str | torch.device = "cpu") -> tuple[Batch, float]:
-    """Keep only sequences with at least one induction-possible position.
-
-    Returns the filtered batch (on `device`) and the fraction of sequences kept.
-    """
-    keep = induction_mask(batch).any(dim=-1)  # (B,)
-    # Only per-sequence tensors are sliced; scalars (`K`) and anything else
-    # whose leading dimension is not the batch pass through untouched.
-    filtered = {k: (v.to(device)[keep] if torch.is_tensor(v) and v.shape[:1] == keep.shape else v)
-                for k, v in batch.items()}
-    return filtered, keep.float().mean().item()
+        return (f"test batch: {self.n_sequences} sequences; trigger queries at {self.frac_trigger:.1%} "
+                f"of positions, {self.frac_in_context:.1%} with the trigger earlier in context")
 
 
 def preprocess_batch(batch: Batch, device: str | torch.device = "cpu") -> tuple[Batch, PreprocessStats]:
-    """Filter the batch and add the `ind_possible` mask.
-
-    Everything downstream (targets at induction positions, on/off-target logits,
-    per-position statistics) is derived lazily by `EvalContext` from this mask,
-    so nothing else needs to be precomputed here.
-    """
-    batch, frac_kept = filter_batch(batch, device)
-    ind_possible = induction_mask(batch)  # (B, L)
-    batch["ind_possible"] = ind_possible
+    """The batch on `device`, and what it holds."""
+    batch = {name: (value.to(device) if torch.is_tensor(value) else value) for name, value in batch.items()}
+    inputs = batch["sequence"][:, :-1]
+    is_trigger = inputs < int(batch["K"])
+    in_context = is_trigger & (occurrence_counts(inputs) > 1)
     stats = PreprocessStats(
-        n_sequences=int(ind_possible.shape[0]),
-        frac_kept=frac_kept,
-        frac_ind_possible=ind_possible.float().mean().item(),
+        n_sequences=int(inputs.shape[0]),
+        frac_trigger=is_trigger.float().mean().item(),
+        frac_in_context=in_context.float().mean().item(),
     )
     return batch, stats

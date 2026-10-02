@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from icl import (Evaluator, LossMetric, MinimalTransformer, PerPositionOnOffLogits, ReducedSGD,
+from icl import (Evaluator, LossMetric, MinimalTransformer, ReducedSGD, TriggerLogitTable,
                  ReducedTransformer, TopKAccuracy, compute_loss, generate_icl_batch, preprocess_batch)
 
 
@@ -41,7 +41,7 @@ def build_pair(**kw):
 
 
 def composed(model):
-    return {name: m for (name, _), m in model.get_composed_matrices().items()}
+    return model.matrices()
 
 
 @pytest.mark.parametrize("kw", [{}, {"pred_mode": "last"}, {"mask1": "prev"}, {"mask2": "prev"}])
@@ -115,14 +115,14 @@ def test_infinite_d():
     loss = compute_loss(model, generate_icl_batch(8, 24, 20, K, stats=False), torch.nn.CrossEntropyLoss(), "cpu")
     loss.backward()
     opt.step()
-    assert all(torch.isfinite(t).all() for t in model.get_composed_matrices().values())
+    assert all(torch.isfinite(t).all() for t in model.matrices().values())
 
 
 def test_chunked_evaluation_matches_one_pass():
     full, _ = build_pair()
     batch, _ = preprocess_batch(generate_icl_batch(64, 24, 20, K))
-    probes = dict(scalars=[TopKAccuracy(1), LossMetric(), LossMetric("loss_ind", "ind")],
-                  artifacts=[PerPositionOnOffLogits([0.5, 1.0])])
+    probes = dict(scalars=[TopKAccuracy(1), LossMetric(), LossMetric(positions="trigg", ell=">=1")],
+                  artifacts=[TriggerLogitTable([0.5, 1.0])])
     one, chunked = Evaluator(**probes), Evaluator(**probes, chunk=7)
     s1, s2 = one.scalars(full, batch, step=0), chunked.scalars(full, batch, step=0)
     assert s1.keys() == s2.keys()
@@ -132,18 +132,17 @@ def test_chunked_evaluation_matches_one_pass():
     ref = torch.nn.CrossEntropyLoss()(full(batch["sequence"][:, :-1]).flatten(0, 1),
                                       batch["sequence"][:, 1:].flatten())
     assert s1["loss"] == pytest.approx(ref.item(), rel=1e-12)
-    a1 = one.artifacts(full, batch, step=0)[("hists", "logits")][0]
-    a2 = chunked.artifacts(full, batch, step=0)[("hists", "logits")][0]
-    assert a1["positions"] == a2["positions"] == [9, 19]
-    for key in ("on", "off", "all"):
-        for x, y in zip(a1[key], a2[key]):
-            assert x.shape == y.shape and (abs(x - y) < 1e-12).all()
+    saved_one_pass = one.artifacts(full, batch, step=0)[("table", "logits")][0]
+    saved_chunked = chunked.artifacts(full, batch, step=0)[("table", "logits")][0]
+    assert set(saved_one_pass["mu"].tolist()) <= {10, 20} and saved_one_pass["logits"].shape == (len(saved_one_pass["mu"]), 24)
+    for column in ("logits", "mu", "ell", "sequence_index"):
+        assert saved_one_pass[column].shape == saved_chunked[column].shape and (abs(saved_one_pass[column] - saved_chunked[column]) < 1e-12).all()
 
 
 def test_logit_positions():
-    probe = PerPositionOnOffLogits([1.0, 0.5, 0.75, 0.5])
+    probe = TriggerLogitTable([1.0, 0.5, 0.75, 0.5])
     assert probe.fractions == [0.5, 0.75, 1.0]
-    assert probe.positions(512) == [255, 383, 511]
-    assert probe.positions(10) == [4, 7, 9]
+    assert probe.mus(512) == [256, 384, 512]
+    assert probe.mus(10) == [5, 8, 10]
     with pytest.raises(ValueError):
-        PerPositionOnOffLogits([0.0])
+        TriggerLogitTable([0.0])

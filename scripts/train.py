@@ -34,8 +34,8 @@ from omegaconf import OmegaConf
 from tracklab import ExperimentTracker
 
 from icl import (
-    ComposedMatrices, Evaluator, GammaOrderParameters, LossMetric, MOrderParameters,
-    PerPositionOnOffLogits, QOrderParameters, TopKAccuracy, TrainerArgs, build_model,
+    ComposedMatrices, Evaluator, LossMetric, OrderParameters, TopKAccuracy, TrainerArgs,
+    TriggerLogitTable, build_model,
     compute_loss, generate_icl_batch, get_evaluation_times, load_config, log_artifacts,
     preprocess_batch, set_matmul_precision, set_seed,
 )
@@ -73,11 +73,9 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
     evaluator = Evaluator(
         scalars=[TopKAccuracy(1),
                  LossMetric(),
-                 MOrderParameters(),
-                 QOrderParameters(),
-                 GammaOrderParameters()],
+                 OrderParameters()],
         artifacts=[ComposedMatrices(),
-                   PerPositionOnOffLogits(cfg.extra_args.logit_positions)],
+                   TriggerLogitTable(cfg.extra_args.logit_positions)],
         chunk=cfg.extra_args.eval_chunk or B,
     )
     eval_steps, artifact_steps = get_evaluation_times(cfg.extra_args)

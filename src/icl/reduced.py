@@ -19,7 +19,7 @@ they map across too; Adam is not, and needs the full model.
 
 Everything is stored normalised by sqrt(d): m = M/√d, q = Q/√d, g = G/√d and
 k = K/d. (m, q, g) are the paper's M, Q, Gamma, and what
-`get_composed_matrices` returns for both backends. In those variables the
+`matrices()` returns for both backends. In those variables the
 forward pass has no d in it at all,
 
     A1     = mask1(m) / √L                  (L, L)
@@ -54,7 +54,7 @@ KERNELS = ("kP", "kE", "kR", "kU")
 class ReducedTransformer(nn.Module):
     """Linear-attention `MinimalTransformer` in the (m, q, g) coordinates.
 
-    Same `forward(x)` / `full_output(x)` / `get_composed_matrices()` interface as
+    Same `forward(x)` / `full_output(x)` / `matrices()` interface as
     the full model, so `compute_loss` and every probe work unchanged. Build it
     with `from_full` or `sample`; the constructor only allocates.
     """
@@ -105,6 +105,26 @@ class ReducedTransformer(nn.Module):
             }
         reduced = cls(_Args.of(model), d).to(device=E.device, dtype=model.embed.E.weight.dtype)
         reduced._load({k: v / (math.sqrt(d) if k in ("m", "q", "g") else d) for k, v in state.items()})
+        return reduced
+
+    @classmethod
+    def from_matrices(cls, mats: dict, args, device=None, dtype=None) -> "ReducedTransformer":
+        """The model whose forward pass is exactly the one defined by the composed
+        matrices `mats = {"M", "Q", "G"}` (the `matrices()` convention; torch
+        tensors or numpy arrays), for any run trained with lin_attn, whatever its
+        backend or d. `args` is the run's ModelArgs.
+
+        Meant for evaluation: the Gram matrices are set to the identity (d = inf),
+        which does not enter the forward pass but does enter `ReducedSGD`, so
+        training it further is the d = inf dynamics. dtype defaults to that of M.
+        """
+        M, Q, G = (torch.as_tensor(mats[k]) for k in ("M", "Q", "G"))
+        L, V = args.seq_len, args.vocab_size
+        if M.shape != (L, L) or Q.shape != (V, V) or G.shape != (V, V):
+            raise ValueError(f"matrices of shape {tuple(M.shape)}, {tuple(Q.shape)}, {tuple(G.shape)} "
+                             f"do not match seq_len={L}, vocab_size={V}")
+        reduced = cls(args, math.inf).to(device=device, dtype=dtype or M.dtype)
+        reduced._load({"m": M, "q": Q, "g": G})
         return reduced
 
     @classmethod
@@ -171,12 +191,12 @@ class ReducedTransformer(nn.Module):
 
     # ---- analysis objects ----------------------------------------------------
 
-    def get_composed_matrices(self) -> dict:
-        """Same keys and scale as `MinimalTransformer.get_composed_matrices`:
-        m, q, g on the CPU (m masked like the full model's M). Finite at d = inf."""
+    def matrices(self) -> dict[str, torch.Tensor]:
+        """Same keys and convention as `MinimalTransformer.matrices`: m, q, g on
+        the CPU (m masked like the full model's M). Finite at d = inf."""
         with torch.no_grad():
             mats = {"M": self.m.masked_fill(~self.mask1, 0.0), "Q": self.q, "G": self.g}
-            return {(name, "matrices"): mat.detach().cpu() for name, mat in mats.items()}
+            return {name: mat.detach().cpu() for name, mat in mats.items()}
 
 
 class ReducedSGD(torch.optim.Optimizer):

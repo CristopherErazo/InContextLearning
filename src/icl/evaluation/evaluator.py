@@ -3,7 +3,7 @@ every probe.
 
     ctx = EvalContext(model, batch, step, chunk=256)
     ctx.token_loss        # runs the (chunked) forward pass once, on first access
-    ctx.on_target_logits  # derived from ctx.logits_ind, also computed once
+    ctx.trigger_logits    # from the same pass: the logits at every trigger query
 
 A *probe* is any callable with a `name` that takes an `EvalContext`. Scalar
 probes return a float (or a dict of floats) that is logged as metrics;
@@ -16,7 +16,7 @@ their results differs, and `Evaluator` does that packing.
 
 The forward pass runs over the test batch in chunks of `chunk` sequences and
 keeps only what the probes read: the per-position cross-entropy (B, L) and the
-logits at induction-possible positions (N, V). Nothing of size (B, L, d) or
+logits at the trigger queries (N, V). Nothing of size (B, L, d) or
 (B, L, V) outlives a chunk, so evaluation needs no more memory than a training
 step on `chunk` sequences. Probes that want the attention maps use `outputs`,
 which is NOT chunked.
@@ -29,23 +29,17 @@ from typing import Any, Protocol, runtime_checkable
 import torch
 import torch.nn.functional as F
 
+from ..data import occurrence_counts
+
 ArtifactKey = tuple[str, str | None]    # (name, group)
 ArtifactValue = tuple[Any, str]          # (data, tracklab type: 'tensor' | 'pickle' | 'torch')
 Artifacts = dict[ArtifactKey, ArtifactValue]
 
 
-def split_on_off(logits: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Split (N, V) logits into on-target (N,) and off-target (N, V-1) logits."""
-    on = logits.gather(1, targets[:, None]).squeeze(1)
-    vocab = torch.arange(logits.size(1), device=logits.device)
-    off = logits[vocab[None, :] != targets[:, None]].view(logits.size(0), -1)
-    return on, off
-
-
 class EvalContext:
     """Lazy view of (model, batch) at one training step.
 
-    Cheap tensors (inputs, targets, the induction mask) are set eagerly. Anything that runs
+    Cheap tensors (inputs, targets, the trigger mask, ell) are set eagerly. Anything that runs
     the model or multiplies weights is a `cached_property`: computed at most
     once per context and only if some probe asks for it. A context must not
     outlive the weights it was built for; `Evaluator` handles that by keying
@@ -56,19 +50,19 @@ class EvalContext:
         self.model = model
         self.step = step
         self.chunk = chunk  # sequences per forward pass; None = the whole batch at once
+        self.batch = batch  # as given, for probes that need more than the fields below
         self.device = next(model.parameters()).device
 
         seq = batch["sequence"].to(self.device)                     # (B, L+1)
         self.input = seq[:, :-1]                                    # (B, L)
         self.target = seq[:, 1:]                                    # (B, L)
         self.K = int(batch["K"])                                    # triggers are the tokens 0..K-1
-        self.ind_possible = batch["ind_possible"].to(self.device)   # (B, L)
+        self.is_trigger = self.input < self.K                       # (B, L)
+        self.ell = occurrence_counts(self.input) - 1                # (B, L) earlier occurrences of the query
         if model.pred_mode == "last":
             # the model only emits logits for the final query; keep masks aligned with (B, 1, V)
             self.target = self.target[:, -1:]
-            self.ind_possible = self.ind_possible[:, -1:]
-        self.ind_not_possible = ~self.ind_possible
-        self.all = torch.ones_like(self.ind_possible)
+            self.is_trigger, self.ell = self.is_trigger[:, -1:], self.ell[:, -1:]
 
     # ---- model outputs: one chunked forward pass for everything ------------------
 
@@ -83,22 +77,22 @@ class EvalContext:
 
     @cached_property
     def _forward(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """(per-position cross-entropy (B, Lq), logits at induction positions (N, V)).
+        """(per-position cross-entropy (B, Lq), logits at the trigger queries (N, V)).
 
-        The rows of the second come in `torch.where(ind_possible)` order, so they
-        line up with `ind_index`.
+        The rows of the second come in `torch.where(is_trigger)` order, so they
+        line up with `trigger_index`.
         """
         def run():
             B = self.input.size(0)
             step = self.chunk or B
-            losses, ind_logits = [], []
+            losses, trigger_logits = [], []
             for s in range(0, B, step):
                 logits = self.model(self.input[s:s + step])            # (b, Lq, V)
                 target = self.target[s:s + step]
                 losses.append(F.cross_entropy(logits.flatten(0, 1), target.flatten(),
                                               reduction="none").view_as(target))
-                ind_logits.append(logits[self.ind_possible[s:s + step]])
-            return torch.cat(losses), torch.cat(ind_logits)
+                trigger_logits.append(logits[self.is_trigger[s:s + step]])
+            return torch.cat(losses), torch.cat(trigger_logits)
         return self._no_grad_eval(run)
 
     @property
@@ -120,36 +114,24 @@ class EvalContext:
     def attn2(self) -> torch.Tensor:   # (B, L, L) or (B, 1, L)
         return self.outputs["A2"]
 
-    # ---- induction positions ----------------------------------------------------
+    # ---- trigger queries ----------------------------------------------------------
 
     @cached_property
-    def ind_index(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """(batch_idx, position_idx) of every induction-possible position, each (N,)."""
-        return torch.where(self.ind_possible)
+    def trigger_index(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """(sequence index, position index) of every trigger query, each (N,)."""
+        return torch.where(self.is_trigger)
 
     @property
-    def n_ind(self) -> int:
-        return int(self.ind_index[0].numel())
-
-    @property
-    def logits_ind(self) -> torch.Tensor:  # (N, V)
+    def trigger_logits(self) -> torch.Tensor:  # (N, V), raw token order
         return self._forward[1]
 
     @cached_property
-    def target_ind(self) -> torch.Tensor:  # (N,)
-        return self.target[self.ind_index]
+    def trigger_target(self) -> torch.Tensor:  # (N,)
+        return self.target[self.trigger_index]
 
     @cached_property
-    def on_off_logits(self) -> tuple[torch.Tensor, torch.Tensor]:
-        return split_on_off(self.logits_ind, self.target_ind)
-
-    @property
-    def on_target_logits(self) -> torch.Tensor:   # (N,)
-        return self.on_off_logits[0]
-
-    @property
-    def off_target_logits(self) -> torch.Tensor:  # (N, V-1)
-        return self.on_off_logits[1]
+    def trigger_ell(self) -> torch.Tensor:     # (N,) earlier occurrences of the query trigger
+        return self.ell[self.trigger_index]
 
     # ---- vocabulary ---------------------------------------------------------------
 
@@ -167,9 +149,8 @@ class EvalContext:
 
     @cached_property
     def matrices(self) -> dict[str, torch.Tensor]:
-        """Composed analysis matrices {"M", "Q", "G"} (on CPU), from the model,
-        normalised by sqrt(d): the O(1) objects the order parameters average."""
-        return {name: m for (name, _group), m in self.model.get_composed_matrices().items()}
+        """`model.matrices()`: {"M", "Q", "G"} on the CPU, normalised by sqrt(d)."""
+        return self.model.matrices()
 
     @property
     def E(self):    return self.model.embed.E.weight.T      # (d, V)

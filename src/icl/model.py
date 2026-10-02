@@ -163,10 +163,17 @@ class MinimalTransformer(nn.Module):
     logits = self.beta * self.unembed(X2) / math.sqrt(self.d_model) # (B, 1, V) or (B, L, V)
     return logits
 
-  def get_composed_matrices(self) -> dict:
-    """Returns a dictionary of composed matrices for analysis, normalised by
-    sqrt(d) as in the paper (M = Pᵀ WQK1 P / √d, etc.), so that the logits are
-    beta / L * sum M Q G with no d left."""
+  def matrices(self) -> dict[str, torch.Tensor]:
+    """The composed matrices {"M", "Q", "G"} on the CPU, in the convention used
+    everywhere in the package (and by `ReducedTransformer.matrices`):
+
+        M = Pᵀ WQK1 P / √d   (L, L), masked by layer 1's mask
+        Q = Eᵀ WQK2 WOV1 E / √d   (V, V)
+        G = U WOV2 E / √d    (V, V)
+
+    i.e. the paper's M, Q, Gamma, for which the logits are beta / L * sum M Q G
+    with no d left. With lin_attn they determine the logits completely
+    (`ReducedTransformer.from_matrices` rebuilds the model from them)."""
     s = math.sqrt(self.d_model)
     with torch.no_grad():
       E = self.embed.E.weight.T  # shape (d, V)
@@ -186,9 +193,9 @@ class MinimalTransformer(nn.Module):
       M = M.masked_fill(~self.attn1.mask, 0.0)
 
       composed_matrices = {
-          ("M","matrices"): M,  # shape (L, L)
-          ("Q","matrices"): E.T @ WQK2 @ WOV1 @ E,  # shape (V, V)
-          ("G","matrices"): U @ WOV2 @ E # shape (V, V)
+          "M": M,  # shape (L, L)
+          "Q": E.T @ WQK2 @ WOV1 @ E,  # shape (V, V)
+          "G": U @ WOV2 @ E # shape (V, V)
       }
       composed_matrices = {k: (v / s).detach().cpu() for k, v in composed_matrices.items()}
     return composed_matrices

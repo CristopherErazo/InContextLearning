@@ -4,117 +4,112 @@ that is logged as a metric. Add a new one here and pass it to
 """
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 import torch
 
+from ..theory import measure_order_params
 from .evaluator import EvalContext
 
-MaskName = Literal["all", "ind", "no_ind"]
+Positions = Literal["all", "trigg", "non_trigg"]
+_AT_LEAST = re.compile(r"^>=\s*(\d+)$")
+
+
+def _check_ell(ell) -> None:
+    ok = (ell is None or (isinstance(ell, int) and not isinstance(ell, bool))
+          or (isinstance(ell, (list, tuple)) and ell and all(isinstance(e, int) for e in ell))
+          or (isinstance(ell, str) and _AT_LEAST.match(ell)))
+    if not ok:
+        raise ValueError(f"ell must be None, an int, a list of ints or '>=k', got {ell!r}")
+
+
+def ell_mask(ell: torch.Tensor, spec) -> torch.Tensor:
+    """Where `ell` matches `spec`: None (any), an int (==), a list (in) or '>=k'."""
+    if spec is None:
+        return torch.ones_like(ell, dtype=torch.bool)
+    if isinstance(spec, str):
+        return ell >= int(_AT_LEAST.match(spec).group(1))
+    return torch.isin(ell, torch.as_tensor(spec, device=ell.device).reshape(-1))
+
+
+def _ell_suffix(spec) -> str:
+    if spec is None:
+        return ""
+    if isinstance(spec, str):
+        return f"_ell_ge{_AT_LEAST.match(spec).group(1)}"
+    return "_ell" + "_".join(str(e) for e in ([spec] if isinstance(spec, int) else spec))
+
+
+def _mean_or_nan(values: torch.Tensor) -> float:
+    """The mean, or NaN when nothing was selected (e.g. an ell no query of the
+    test batch has): logged as NaN rather than failing the evaluation."""
+    return values.mean().item() if values.numel() else float("nan")
 
 
 class LossMetric:
-    """Mean cross-entropy on a subset of positions: every position, only
-    induction-possible ones, or only the rest."""
+    """Mean cross-entropy over a subset of the positions of the test batch.
 
-    def __init__(self, name: str = "loss", mask: MaskName = "all"):
-        if mask not in ("all", "ind", "no_ind"):
-            raise ValueError(f"mask must be 'all', 'ind' or 'no_ind', got {mask!r}")
-        self.name, self.mask = name, mask
+    positions: "all" (the population loss), "trigg" (trigger queries) or
+    "non_trigg" (every other position). ell, only with "trigg": None (every
+    trigger query), an int k (ell == k), a list (ell in it) or ">=k" (ell >= k),
+    with ell the number of earlier occurrences of the query trigger. The name
+    defaults to e.g. "loss", "loss_trigg", "loss_trigg_ell0", "loss_trigg_ell_ge1".
+    NaN if no position of the test batch matches.
+    """
+
+    def __init__(self, name: str | None = None, positions: Positions = "all", ell=None):
+        if positions not in ("all", "trigg", "non_trigg"):
+            raise ValueError(f"positions must be 'all', 'trigg' or 'non_trigg', got {positions!r}")
+        _check_ell(ell)
+        if ell is not None and positions != "trigg":
+            raise ValueError("ell only applies to positions='trigg'")
+        self.positions, self.ell = positions, ell
+        default = "loss" if positions == "all" else f"loss_{positions}{_ell_suffix(ell)}"
+        self.name = name or default
 
     def __call__(self, ctx: EvalContext) -> float:
-        mask = {"all": ctx.all, "ind": ctx.ind_possible, "no_ind": ctx.ind_not_possible}[self.mask]
-        return ctx.token_loss[mask].mean().item()
+        if self.positions == "all":
+            selected = torch.ones_like(ctx.is_trigger)
+        elif self.positions == "trigg":
+            selected = ctx.is_trigger & ell_mask(ctx.ell, self.ell)
+        else:
+            selected = ~ctx.is_trigger
+        return _mean_or_nan(ctx.token_loss[selected])
 
 
 class TopKAccuracy:
-    """Fraction of induction-possible positions whose target is in the top-k logits."""
+    """In-context accuracy: the fraction of trigger queries with ell >= 1 (the
+    trigger appeared earlier, so the target is in the context) whose target is
+    among the top-k logits. NaN if the test batch has no such query."""
 
     def __init__(self, k: int = 1):
         self.k, self.name = k, f"top{k}_accuracy"
 
     def __call__(self, ctx: EvalContext) -> float:
-        topk = ctx.logits_ind.topk(self.k, dim=-1).indices              # (N, k)
-        return (topk == ctx.target_ind[:, None]).any(dim=-1).float().mean().item()
+        in_context = ctx.trigger_ell >= 1
+        top_k = ctx.trigger_logits[in_context].topk(self.k, dim=-1).indices     # (N, k)
+        hit = (top_k == ctx.trigger_target[in_context][:, None]).any(dim=-1)
+        return _mean_or_nan(hit.float())
 
 
 class TargetProbMass:
-    """Mean softmax probability of the target at induction-possible positions."""
+    """Mean softmax probability of the target at the trigger queries with
+    ell >= 1. NaN if the test batch has no such query."""
 
     name = "target_prob"
 
     def __call__(self, ctx: EvalContext) -> float:
-        probs = torch.softmax(ctx.logits_ind, dim=-1)                    # (N, V)
-        return probs.gather(1, ctx.target_ind[:, None]).mean().item()
+        in_context = ctx.trigger_ell >= 1
+        probs = torch.softmax(ctx.trigger_logits[in_context], dim=-1)          # (N, V)
+        return _mean_or_nan(probs.gather(1, ctx.trigger_target[in_context][:, None]))
 
 
-class LogitStatistics:
-    """Mean / variance of on- and off-target logits at induction-possible
-    positions, plus their covariance."""
+class OrderParameters:
+    """Every order parameter registered in `icl.theory.ansatz.ORDER_PARAMS`,
+    measured from `ctx.matrices` (the mean of each over its support)."""
 
-    name = "logit_statistics"
-    names = ("on_logit_mean", "on_logit_var", "off_logit_mean", "off_logit_var", "on_off_covariance")
-
-    def __call__(self, ctx: EvalContext) -> dict[str, float]:
-        on, off = ctx.on_target_logits, ctx.off_target_logits           # (N,), (N, V-1)
-        mean_on, mean_off = on.mean(), off.mean()
-        cov = ((on[:, None] - mean_on) * (off - mean_off)).mean()
-        return {
-            "on_logit_mean": mean_on.item(),
-            "on_logit_var": on.var().item(),
-            "off_logit_mean": mean_off.item(),
-            "off_logit_var": off.var().item(),
-            "on_off_covariance": cov.item(),
-        }
-
-
-class MOrderParameters:
-    """Order parameters of `M = P^T WQK1 P / sqrt(d)`, whose active part is the strictly
-    lower triangle (a query attends only to j < i): `M_on` is the first
-    sub-diagonal, `M_off` everything below it."""
-
-    name = "M_order_parameters"
-    names = ("M_on", "M_off")
+    name = "order_parameters"
 
     def __call__(self, ctx: EvalContext) -> dict[str, float]:
-        M = ctx.matrices["M"]                                    # (L, L)
-        L = M.size(0)
-        on = M.diagonal(-1).sum() / (L - 1)                      # M_{mu, mu-1}, mu = 2..L
-        off = 2 * M.tril(-2).sum() / ((L - 1) * (L - 2))         # mu = 3..L, nu <= mu-2
-        return {"M_on": on.item(), "M_off": off.item()}
-
-
-class QOrderParameters:
-    """Order parameters of `Q = E^T WQK2 WOV1 E / sqrt(d)`: the trigger diagonal, the
-    off-diagonal trigger rows, and the non-trigger rows."""
-
-    name = "Q_order_parameters"
-    names = ("Q_on", "Q_T", "Q_noT")
-
-    def __call__(self, ctx: EvalContext) -> dict[str, float]:
-        Q = ctx.matrices["Q"]                                    # (V, V)
-        V = Q.size(0)
-        trig, K = ctx.trigger_mask, ctx.K
-        diag = Q.diagonal()
-        on = diag[trig].sum() / K
-        q_t = (Q[trig].sum() - diag[trig].sum()) / (K * (V - 1))
-        q_no = Q[~trig].sum() / (V * (V - K))
-        return {"Q_on": on.item(), "Q_T": q_t.item(), "Q_noT": q_no.item()}
-
-
-class GammaOrderParameters:
-    """Order parameters of `Gamma = U WOV2 E / sqrt(d)`: the non-trigger diagonal, the
-    trigger rows, and the off-diagonal non-trigger rows."""
-
-    name = "G_order_parameters"
-    names = ("G_on", "G_T", "G_noT")
-
-    def __call__(self, ctx: EvalContext) -> dict[str, float]:
-        G = ctx.matrices["G"]                                    # (V, V)
-        V = G.size(0)
-        trig, K = ctx.trigger_mask, ctx.K
-        diag = G.diagonal()
-        on = diag[~trig].sum() / (V - K)
-        g_t = G[trig].sum() / (K * V)
-        g_no = (G[~trig].sum() - diag[~trig].sum()) / ((V - K) * (V - 1))
-        return {"G_on": on.item(), "G_T": g_t.item(), "G_noT": g_no.item()}
+        return measure_order_params(ctx.matrices, ctx.K)

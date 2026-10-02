@@ -11,7 +11,7 @@ MIN_TOTAL_STEPS = 100  # lower bound on a budget derived from extra_args.alpha_s
 @dataclass
 class ModelArgs:
     vocab_size: int = 128 # Vocabulary size
-    d_model: int = 256 # Model dimension
+    d_model: int = 8000 # Model dimension
     seq_len: int = 256 # Sequence length
     lin_attn: bool = True  # Whether to use linear attention or not
     beta: float = 0.25  # Scaling factor for output logits
@@ -22,7 +22,7 @@ class ModelArgs:
     dropout: float = 0.0  # Dropout rate
     # "full": MinimalTransformer with d x d weights. "reduced": the same model trained by SGD
     # in the (M, Q, G) coordinates the loss depends on (icl.reduced) -- exact, cost independent of d.
-    backend: str = "full"
+    backend: str = "reduced"
     init: str = "full"  # reduced only: "full" (compose a MinimalTransformer: same draw) or "sample" (any d)
     infinite_d: bool = False  # reduced + init="sample" only: take d_model -> inf (d_model is then ignored)
 
@@ -30,8 +30,8 @@ class ModelArgs:
 @dataclass
 class DataArgs:
     alpha_batch: float = 1000.0  # Scaling factor for batch size ~1/(L * frac_solvable)
-    batch_size: int | None = field(default=None)  # Batch size (computed from alpha_batch) if given, overrides alpha_batch
-    test_size: int = 1024  # Number of samples in test set
+    batch_size: int | None = field(default=512)  # Batch size (computed from alpha_batch) if given, overrides alpha_batch
+    test_size: int = 512  # Number of samples in test set
     rho: float = 0.2  # Fraction of trigger tokens = K/vocab_size
     gen_device: str = "auto"  # Where batches are sampled: "cpu", "cuda", or "auto" (= training device)
     # Computed Values as placeholders; will be computed later
@@ -41,7 +41,7 @@ class DataArgs:
 
 @dataclass
 class OptimArgs:
-    alpha_lr: float = 2500.0  # Base learning rate factor
+    alpha_lr: float = 3000.0  # Base learning rate factor
     opt_name: str = "sgd"  # Optimizer type: "adam" or "sgd"
     momentum: float = 0.0  # Momentum for SGD
     weight_decay: float = 0.0  # L2 regularization
@@ -58,10 +58,10 @@ class ExtraArgs:
     # (see compute_derived_args). The scaling sweeps set alpha_steps so that every
     # configuration gets the same budget *in units of its own T**.
     alpha_steps: float | None = None  # Scaling factor for total steps
-    total_steps: int = field(default=1000)  # Total number of training steps
+    total_steps: int = field(default=3000)  # Total number of training steps
     stop_at_accuracy: float | None = None  # Stop once top1_accuracy reaches this (None = never)
-    n_prints: int = 75  # Metric evaluation frequency
-    n_prints_model: int = 20  # Model checkpoint frequency
+    n_prints: int = 50  # Metric evaluation frequency
+    n_prints_model: int = 10  # Model checkpoint frequency
     print_scale: str = 'linear'  # Scale for evaluation: log or linear
     experiment_name: str | None  = 'icl' # Experiment tracking name
     seed: int | None = 42      # Random seed
@@ -73,9 +73,9 @@ class ExtraArgs:
     track_artifacts: bool = True
     base_dir : str | None = "./data"  # Base directory for data storage
     launch_token: str | None = None  # Set by rewind.RunLauncher (dashboard); used for the run_id handshake
-    log_to_terminal: bool = False  # Whether to print metrics to terminal
+    log_to_terminal: bool = True  # Whether to print metrics to terminal
     eval_chunk: int | None = None  # Test sequences per evaluation forward pass (None = data_args.batch_size)
-    # Positions saved by the per-position logits artifact, as fractions of L: f -> position ceil(f*L)-1
+    # Positions saved by the TriggerLogitTable artifact, as fractions of L: f -> mu = ceil(f*L)
     logit_positions: list[float] = field(default_factory=lambda: [0.5, 0.75, 1.0])
     
 

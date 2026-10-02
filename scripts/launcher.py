@@ -19,7 +19,7 @@ from rewind.launch import write_handshake
 from tracklab import ExperimentTracker
 
 from icl import (
-    ComposedMatrices, Evaluator, LossMetric, MinimalTransformer, PerPositionOnOffLogits,
+    ComposedMatrices, Evaluator, LossMetric, MinimalTransformer, TriggerLogitTable,
     TopKAccuracy, TrainerArgs, compute_loss, generate_icl_batch, get_evaluation_times,
     get_optimizer, load_config, preprocess_batch, set_matmul_precision, set_seed,
 )
@@ -51,7 +51,7 @@ def build_controller(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -
     test_batch, batch_stats = preprocess_batch(generate_icl_batch(TB, V, L, K, device=gen_device), device)
     evaluator = Evaluator(
         scalars=[TopKAccuracy(1), LossMetric()],
-        artifacts=[ComposedMatrices(), PerPositionOnOffLogits(cfg.extra_args.logit_positions)],
+        artifacts=[ComposedMatrices(), TriggerLogitTable(cfg.extra_args.logit_positions)],
         chunk=cfg.extra_args.eval_chunk or B,
     )
 

@@ -8,23 +8,22 @@
 
 Both calls at the same `step` share one forward pass through `EvalContext`.
 """
-from .batch import PreprocessStats, filter_batch, induction_mask, preprocess_batch
+from .batch import PreprocessStats, preprocess_batch
 from .schedule import evaluation_steps, get_evaluation_times
-from .evaluator import Artifacts, EvalContext, Evaluator, Probe, log_artifacts, split_on_off
-from .scalars import (GammaOrderParameters, LogitStatistics, LossMetric, MOrderParameters,
-                      QOrderParameters, TargetProbMass, TopKAccuracy)
-from .artifacts import AttentionMaps, ComposedMatrices, LogitHistograms, PerPositionOnOffLogits
+from .evaluator import Artifacts, EvalContext, Evaluator, Probe, log_artifacts
+from .scalars import LossMetric, OrderParameters, TargetProbMass, TopKAccuracy, ell_mask
+from .artifacts import AttentionMaps, ComposedMatrices, TriggerLogitTable
 
 __all__ = [
     # batch
-    "preprocess_batch", "filter_batch", "induction_mask", "PreprocessStats",
+    "preprocess_batch", "PreprocessStats",
     # schedule
     "evaluation_steps", "get_evaluation_times",
     # machinery
-    "EvalContext", "Evaluator", "Probe", "Artifacts", "log_artifacts", "split_on_off",
+    "EvalContext", "Evaluator", "Probe", "Artifacts", "log_artifacts",
     # scalar probes
-    "LossMetric", "TopKAccuracy", "TargetProbMass", "LogitStatistics",
-    "MOrderParameters", "QOrderParameters", "GammaOrderParameters",
+    "LossMetric", "TopKAccuracy", "TargetProbMass", "ell_mask",
+    "OrderParameters",
     # artifact probes
-    "ComposedMatrices", "PerPositionOnOffLogits", "LogitHistograms", "AttentionMaps",
+    "ComposedMatrices", "TriggerLogitTable", "AttentionMaps",
 ]

@@ -53,6 +53,7 @@ def generate_icl_batch(num_samples: int,
         dict with:
             sequence     : (B, L+1)   input is [:, :-1], target is [:, 1:]
             K            : int        the triggers are the tokens 0..K-1
+            V            : int        the vocabulary size
             output_set   : (B, K)     trigger i of sequence b maps to [b, i]
             counts       : (B, L)     occurrences of the token at each position,
                                       counting that position (only if `stats`)
@@ -99,6 +100,7 @@ def generate_icl_batch(num_samples: int,
     batch: Batch = {
         "sequence": sequence,                                       # (B, L+1)
         "K": K,                                                     # triggers are 0..K-1
+        "V": V,
         "output_set": output_sets,                                  # (B, K)
     }
     if stats:

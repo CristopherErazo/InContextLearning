@@ -89,10 +89,11 @@ dashboard learns which `run_id` the child claimed.
 (fixed across the batch); each sequence samples its own K output tokens from `[K, V-1]`
 and follows the rule "trigger → its output, anything else → uniform random". Sequences
 have length `L+1` (input = `[:, :-1]`, target = `[:, 1:]`). The trigger set is never
-materialised: the batch carries only the scalar `K`, and "token `< K`" is the
-trigger test everywhere (evaluation depends on this). The batch dict also carries
-`is_trigg` and `counts` (occurrence count of the token at each position), which
-downstream code combines into the "induction possible" mask `is_trigg & (counts > 1)`.
+materialised: the batch carries only the scalars `K` and `V`, and "token `< K`" is the
+trigger test everywhere (evaluation and `icl.theory` depend on this). The batch dict also carries
+`is_trigg` and `counts` (occurrence count of the token at each position) when
+`stats=True`; evaluation recomputes both from `sequence` (ell = counts - 1), so it does
+not depend on them.
 
 The generator is loop-free. Because outputs are drawn from `[K, V-1]` they are never
 triggers, so no two triggers can be adjacent, and the chain has the closed form
@@ -101,7 +102,7 @@ triggers, so no two triggers can be adjacent, and the chain has the closed form
 (a `cummax`) and `counts` from a stable argsort. That invariant is load-bearing — if
 outputs ever overlap the trigger set, this derivation is void. Position 0 is drawn from
 the chain's stationary law, which is exactly weight `2/(V+K)` on output tokens and
-`1/(V+K)` elsewhere. `stats=False` returns only `sequence` / `K` / `output_set`
+`1/(V+K)` elsewhere. `stats=False` returns only `sequence` / `K` / `V` / `output_set`
 and skips the `counts` work; training passes it, evaluation does not.
 `device=` draws the batch there directly and `data_args.gen_device` (`"cpu"`, `"cuda"`
 or `"auto"` = the training device, the default) is what the scripts pass — benchmark
@@ -129,9 +130,12 @@ nothing to attend to (position 0 under either mask) instead of returning NaN, wh
 what the linear path already did. `initialize_model()` freezes everything
 and then unfreezes only `attn1.WQK`, `attn2.WQK`, `attn2.WOV`; E, P, U and `attn1.WOV`
 stay at random init. Logits are `beta * U(X2) / sqrt(d)`. `pred_mode="last"` runs
-layer 2 only for the final query. `get_composed_matrices()` returns the analysis
-objects normalised as in the paper, `M = Pᵀ WQK1 P / √d`, `Q = Eᵀ WQK2 WOV1 E / √d`,
-`G = U WOV2 E / √d` (logits `= beta/L Σ M Q G`), keyed as `(name, "matrices")` tuples — that key shape is what TrackLab's artifact writer expects.
+layer 2 only for the final query. `matrices()` returns the analysis objects as the
+plain dict `{"M", "Q", "G"}` (CPU tensors), normalised as in the paper,
+`M = Pᵀ WQK1 P / √d` (masked by layer 1's mask), `Q = Eᵀ WQK2 WOV1 E / √d`,
+`G = U WOV2 E / √d` (logits `= beta/L Σ M Q G`). That dict is the one matrix
+convention of the package: probes, artifacts, `RunData` and
+`ReducedTransformer.from_matrices` all use it.
 
 **Reduced backend (`src/icl/reduced.py`, `model_args.backend="reduced"`).** The same
 model trained by SGD, rewritten in the coordinates the loss depends on. The logits
@@ -151,9 +155,49 @@ reproduced; the d×d weights have to fit once), and `"sample"` draws the Gram ma
 trajectories agree to 1e-9 in float64 and the sampled init has the full init's
 moments. Rerunning `large_d_sweep_1/run_005` (d=2048, L=512) with `init=full` gave
 the same early-stop step with metrics equal to ~1e-4 relative (TF32), at 25 vs 356
-ms/step. `get_composed_matrices()` returns m, q, g, the same objects and scale as the
-full model's (finite at d = inf). Only `scripts/train.py`
+ms/step. `matrices()` returns m, q, g, the same objects and scale as the full model's
+(finite at d = inf). `ReducedTransformer.from_matrices(mats, model_args)` rebuilds the
+exact forward pass of any lin_attn run (either backend, any d) from its saved
+matrices, with the Gram matrices set to I (so further training is the d = inf
+dynamics). Only `scripts/train.py`
 builds it; `scripts/launcher.py` refuses `backend != "full"`.
+
+**Reading runs back (`src/icl/runs.py`, `RunData`).** The analysis entry point:
+`RunData(experiment, run_id, base_dir)` (or `RunData.last(experiment, base_dir)`) gives
+`.config` (typed TrainerArgs as saved), `.metrics` (wide DataFrame indexed by step),
+`.steps(group)`, `.load(group, name, step)`, `.matrices(step)`, `.model(step)` (a
+`ReducedTransformer.from_matrices`, exact for lin_attn runs) and `.batch(n, seed)` (a
+fresh unfiltered batch with the run's V, L, K), `.order_params(step)` (every registered
+order parameter, measured from the saved matrices) and `.logit_table(step)` (the
+`TriggerLogitTable` probe's `QueryTable`). `step` is an int, `"first"` or `"last"`.
+`tests/test_runs.py` checks the round trip model → artifact → `RunData.model` keeps the
+logits for both backends.
+
+**Effective model (`src/icl/theory/`, paper/scratch/extended_ansatz.tex).** Conventions:
+positions are the paper's `mu = code position + 1`, `ell` = earlier occurrences of the
+query, rows exist only at trigger queries (ell >= 0), and logit vectors are in the
+canonical layout of `logit_blocks(K, V)`: `[0,K)` triggers, `[K,2K-1)` outputs of the other
+triggers (by trigger), `[2K-1,V-1)` the rest (by id), `V-1` the target.
+- `query_table.py` (ansatz-independent): `QueryTable`, a dict of tensor columns with
+  one row per trigger query plus metadata (`num_rows`, `select`, `groups`,
+  `concatenate`, `to_numpy` / `from_numpy`); `logit_blocks(K, V)` (column slices
+  `triggers`, `other_outputs`, `rest`, `target`, `non_target`); `canonical_permutation`;
+  `trigger_queries`; `logit_table(model, batch, mus, chunk)` (the model's canonical
+  logits at trigger queries, with `mu`, `ell`, `sequence_index`);
+  `cluster_cross_entropy(table)` (`count` and mean `cross_entropy` per (mu, ell),
+  differentiable).
+- `ansatz.py`: `ORDER_PARAMS = {name: (matrix, support(L, V, K))}`, the single
+  definition of the order parameters (value = mean over the support);
+  `measure_order_params`, `ansatz_matrices` (inverse of the former), `support_sizes`,
+  and `ansatz_logits(vars, op, beta, L)` (eq. logit_classes_explicit; a missing
+  parameter counts as 0).
+- `variables.py`: `measure_variables(batch, mus)`, the exact Table 1 variables (paper
+  names `N, F, R, W, P` and `U_bar, W_bar, P_bar`), rows aligned one to one with
+  `logit_table` on the same batch.
+Only `ansatz.py` and `variables.py` know the ansatz; extending it = register the
+parameter + add its terms (and variables). `tests/test_theory.py` runs the model on
+`ansatz_matrices(op)` and requires `ansatz_logits(measure_variables(...))` to match to
+1e-12 at every trigger query: keep it passing when the ansatz changes.
 
 **Training helpers (`src/icl/training.py`).** `build_model(model_args, optim_args,
 device)` returns `(model, optimizer, log_line)` for either backend (the full path is
@@ -163,17 +207,21 @@ exactly `MinimalTransformer` + `initialize_model` + `get_optimizer`).
 of `icl.evaluation`.
 
 **Evaluation (`src/icl/evaluation/`).** One module per job:
-- `batch.py`: `preprocess_batch(batch, device)` drops sequences where induction is never
-  possible (`filter_batch`) and adds the `ind_possible` mask (`is_trigg & counts > 1`).
-  It returns `(batch, PreprocessStats)`; nothing else is precomputed.
+- `batch.py`: `preprocess_batch(batch, device)` moves the batch to `device` and returns
+  `(batch, PreprocessStats)` (sequences, fraction of trigger queries, fraction with
+  ell >= 1). The batch is NOT filtered (it used to drop sequences with no
+  induction-possible position, which biased the logged `loss` and the ell = 0
+  frequency), so `loss` estimates the population loss. There is no induction mask any
+  more: probes select positions by `is_trigger` and `ell`.
 - `evaluator.py`: the probing machinery. `EvalContext(model, batch, step, chunk)` is a
   lazy view of the model on the test batch. One forward pass under `inference_mode`
   (train mode restored) runs over the batch `chunk` sequences at a time and keeps only
-  `token_loss` (per-position cross-entropy, (B, L)) and `logits_ind` (logits at
-  induction-possible positions, (N, V)); no (B, L, V) or (B, L, d) tensor outlives a
-  chunk. `ind_index`, `target_ind`, `on/off_target_logits`, `matrices` (from
-  `model.get_composed_matrices`, already normalised by √d) are
-  computed at most once and only if a probe asks. `outputs` / `attn1/2` are one
+  `token_loss` (per-position cross-entropy, (B, L)) and `trigger_logits` (logits at
+  every trigger query, (N, V), raw token order); no (B, L, V) or (B, L, d) tensor
+  outlives a chunk. Set eagerly: `is_trigger` and `ell` ((B, L): earlier occurrences of
+  the query token, from the sequences). Lazy: `trigger_index`, `trigger_target`,
+  `trigger_ell`, `matrices` (`model.matrices()`), each computed at most once and only if
+  a probe asks. `outputs` / `attn1/2` are one
   UNCHUNKED `model.full_output` call, for probes that want the attention maps. A
   *probe* is any callable with a `name` taking an `EvalContext` (the `Probe` protocol).
   `Evaluator(scalars=[...], artifacts=[...], chunk)` memoizes the context on `step`:
@@ -182,19 +230,20 @@ of `icl.evaluation`.
   both calls at the same step share one forward pass. Tensors are moved to CPU / numpy
   during packing, so probes stay device-agnostic. `log_artifacts(run, artifacts, step)`
   writes that dict to a TrackLab run (Rewind consumes the same dict directly).
-- `scalars.py`: scalar probes (`LossMetric`, `TopKAccuracy`, `TargetProbMass`,
-  `LogitStatistics`, and the `M/Q/GammaOrderParameters`, which read
-  `matrices`, finite at d = inf). Add new metrics here.
+- `scalars.py`: scalar probes. `LossMetric(name=None, positions="all"|"trigg"|"non_trigg",
+  ell=None|k|[k, ...]|">=k")` (ell only with "trigg"; default names `loss`,
+  `loss_trigg`, `loss_trigg_ell0`, `loss_trigg_ell_ge1`, ...; NaN when no position of
+  the test batch matches, e.g. an ell too large). `TopKAccuracy` and `TargetProbMass`
+  are the in-context metrics: trigger queries with ell >= 1 only, NaN if there are
+  none. `OrderParameters` logs every entry of `icl.theory.ORDER_PARAMS` from `matrices`
+  (finite at d = inf). Add new metrics here.
 - `artifacts.py`: artifact probes; class attributes `group` (artifact subfolder) and
   `atype` (TrackLab serializer, default `tensor`). A dict result saves one artifact per
   key, so a probe that wants a single pickled dict returns `{self.name: payload}`
-  (`PerPositionOnOffLogits` does this for `logits/hists_step_N.pkl`; `ComposedMatrices`
-  writes `matrices/{M,Q,G}_step_N.npy`, normalised by √d; runs saved before this change
-  hold the unnormalised matrices at finite d, so divide those by √d). `PerPositionOnOffLogits(fractions)` saves only
-  the positions `ceil(f*L) - 1` for `f` in `extra_args.logit_positions` (default
-  `[0.5, 0.75, 1.0]`): the pickle is `{'fractions', 'positions', 'on', 'off', 'all'}`
-  with one array per saved position. Runs before this change hold one array per
-  position (L of them), so old notebooks indexing `lg['on'][l]` need `positions` now.
+  (`ComposedMatrices` writes one `matrices/matrices_step_N.pkl` holding
+  `model.matrices()` as a dict of numpy arrays; `TriggerLogitTable(fractions)` writes
+  `logits/table_step_N.pkl`, the `logit_table` of the test batch at
+  `mu = ceil(f*L)` for `f` in `extra_args.logit_positions`, as a numpy dict).
 - `schedule.py`: `get_evaluation_times(extra_args)` turns `n_prints` / `n_prints_model`
   / `print_scale` into two step sets spanning `[0, total_steps]` inclusive. Evaluation
   at step `s` sees the weights before the s-th update, so `total_steps` is the final
