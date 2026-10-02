@@ -5,17 +5,21 @@
   cross-entropy. Ansatz-independent.
 - `ansatz`: the order-parameter registry and the ansatz logits.
 - `variables`: the sequence variables the ansatz logits depend on.
+- `effective`: the effective population loss, differentiable in the order parameters,
+  and its gradient flow (`integrate`).
 
 Only `ansatz` and `variables` know the ansatz; see `ansatz` for how to extend it.
 """
-from .query_table import (QueryTable, canonical_permutation, cluster_cross_entropy, logit_blocks,
-                          logit_table, trigger_queries)
+from .query_table import (QueryTable, canonical_permutation, check_condition, cluster_cross_entropy,
+                          condition_mask, logit_blocks, logit_table, trigger_queries)
 from .ansatz import ORDER_PARAMS, ansatz_logits, ansatz_matrices, measure_order_params, support_sizes
-from .variables import measure_variables
+from .variables import COUNT_LAWS, mean_variables, measure_variables, sample_variables
+from .effective import EffectiveLoss, integrate, trigger_loss
 
 __all__ = [
     "QueryTable", "canonical_permutation", "cluster_cross_entropy", "logit_blocks", "logit_table",
-    "trigger_queries",
+    "trigger_queries", "check_condition", "condition_mask",
     "ORDER_PARAMS", "ansatz_logits", "ansatz_matrices", "measure_order_params", "support_sizes",
-    "measure_variables",
+    "COUNT_LAWS", "mean_variables", "measure_variables", "sample_variables",
+    "EffectiveLoss", "integrate", "trigger_loss",
 ]

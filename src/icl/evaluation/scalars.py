@@ -4,40 +4,21 @@ that is logged as a metric. Add a new one here and pass it to
 """
 from __future__ import annotations
 
-import re
 from typing import Literal
 
 import torch
 
-from ..theory import measure_order_params
+from ..theory import check_condition, condition_mask, measure_order_params
 from .evaluator import EvalContext
 
 Positions = Literal["all", "trigg", "non_trigg"]
-_AT_LEAST = re.compile(r"^>=\s*(\d+)$")
-
-
-def _check_ell(ell) -> None:
-    ok = (ell is None or (isinstance(ell, int) and not isinstance(ell, bool))
-          or (isinstance(ell, (list, tuple)) and ell and all(isinstance(e, int) for e in ell))
-          or (isinstance(ell, str) and _AT_LEAST.match(ell)))
-    if not ok:
-        raise ValueError(f"ell must be None, an int, a list of ints or '>=k', got {ell!r}")
-
-
-def ell_mask(ell: torch.Tensor, spec) -> torch.Tensor:
-    """Where `ell` matches `spec`: None (any), an int (==), a list (in) or '>=k'."""
-    if spec is None:
-        return torch.ones_like(ell, dtype=torch.bool)
-    if isinstance(spec, str):
-        return ell >= int(_AT_LEAST.match(spec).group(1))
-    return torch.isin(ell, torch.as_tensor(spec, device=ell.device).reshape(-1))
 
 
 def _ell_suffix(spec) -> str:
     if spec is None:
         return ""
     if isinstance(spec, str):
-        return f"_ell_ge{_AT_LEAST.match(spec).group(1)}"
+        return f"_ell_ge{spec.lstrip('>= ')}"
     return "_ell" + "_".join(str(e) for e in ([spec] if isinstance(spec, int) else spec))
 
 
@@ -61,7 +42,7 @@ class LossMetric:
     def __init__(self, name: str | None = None, positions: Positions = "all", ell=None):
         if positions not in ("all", "trigg", "non_trigg"):
             raise ValueError(f"positions must be 'all', 'trigg' or 'non_trigg', got {positions!r}")
-        _check_ell(ell)
+        check_condition(ell)
         if ell is not None and positions != "trigg":
             raise ValueError("ell only applies to positions='trigg'")
         self.positions, self.ell = positions, ell
@@ -72,7 +53,7 @@ class LossMetric:
         if self.positions == "all":
             selected = torch.ones_like(ctx.is_trigger)
         elif self.positions == "trigg":
-            selected = ctx.is_trigger & ell_mask(ctx.ell, self.ell)
+            selected = ctx.is_trigger & condition_mask(ctx.ell, self.ell)
         else:
             selected = ~ctx.is_trigger
         return _mean_or_nan(ctx.token_loss[selected])

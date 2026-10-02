@@ -102,8 +102,9 @@ def ansatz_logits(variables: QueryTable, order_params: dict, beta: float, L: int
     with dQ = Q_on - Q_T, n_keys = max(mu-2, 0) the number of keys and
     sum_keys = n_keys (n_keys-1) / 2 the sum over the keys of (nu - 2).
     """
-    dtype = variables["N"].dtype
-    params = {name: torch.as_tensor(order_params.get(name, 0.0), dtype=dtype) for name in ORDER_PARAMS}
+    dtype, device = variables["N"].dtype, variables["N"].device
+    params = {name: torch.as_tensor(order_params.get(name, 0.0), dtype=dtype, device=device)
+              for name in ORDER_PARAMS}
     M_on, M_off, Q_on, Q_T, G_on, G_T = (params[name] for name in ("M_on", "M_off", "Q_on", "Q_T", "G_on", "G_T"))
     delta_Q = Q_on - Q_T
     prefactor = beta / L

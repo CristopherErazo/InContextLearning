@@ -191,9 +191,36 @@ triggers (by trigger), `[2K-1,V-1)` the rest (by id), `V-1` the target.
   `measure_order_params`, `ansatz_matrices` (inverse of the former), `support_sizes`,
   and `ansatz_logits(vars, op, beta, L)` (eq. logit_classes_explicit; a missing
   parameter counts as 0).
-- `variables.py`: `measure_variables(batch, mus)`, the exact Table 1 variables (paper
-  names `N, F, R, W, P` and `U_bar, W_bar, P_bar`), rows aligned one to one with
-  `logit_table` on the same batch.
+- `variables.py`: the Table 1 variables (paper names `N, F, R, W, P` and `U_bar, W_bar,
+  P_bar`) from three sources, all `QueryTable`s ready for `ansatz_logits`:
+  `measure_variables(batch, mus)` (exact, rows aligned one to one with `logit_table` on
+  the same batch); `sample_variables(mu, ell, V, K, num_samples, counts="poisson" |
+  "multinomial", generator)` (the scratch file's sampling protocol at fixed (mu, ell),
+  mu/ell ints or per-row tensors; padded + masked, pair counts by `searchsorted`); and
+  `mean_variables(mu, ell, V, K)` (Table 2 means, so `ansatz_logits` of it is the mean
+  logit vector). `tests/test_sampler.py` checks every Table 2 mean / variance and the
+  listed covariances (Poisson counts reproduce them exactly) and the multinomial budget.
+- `effective.py`: `EffectiveLoss(V, L, K, beta, method="mean" | "mc", mus, num_samples,
+  counts="multinomial", ell_tol, seed, device)` (or `.from_config(run.config, ...)`), the
+  population loss `(1 - q_T) log V + q_T mean_mu sum_ell Poisson(ell; p_T mu) CE(mu, ell)`
+  with q_T = K/(V+K): "mean" takes CE at the mean logits, "mc" averages over samples
+  drawn once in the constructor (common random numbers, so the loss is smooth). Calling
+  it on `{name: value}` gives a differentiable 0-d tensor; `value_and_grad` returns the
+  gradient for every registered parameter; `breakdown` gives `loss`, `loss_trigg`,
+  `loss_non_trigg` and a per-(mu, ell) `clusters` table, and `trigger_loss(clusters, ell)`
+  is the analogue of `LossMetric(positions="trigg", ell=...)`. `tests/test_effective_loss.py`
+  checks it against the measured loss of a model with exact ansatz matrices (total to
+  0.5%, ell >= 1 to 3%), `gradcheck`, and the GPU path. Selection conditions (`None`, k,
+  `[k, ...]`, `">=k"`) are one helper, `condition_mask` in `query_table.py`, shared by
+  `QueryTable.select`, `trigger_loss` and `LossMetric`.
+  `integrate(loss, initial_order_params, rates, steps, record_steps, method="LSODA")`
+  runs `d theta_i/d step = -rates[i] d loss/d theta_i` with `scipy.integrate.solve_ivp`
+  (time in SGD steps; the rates are the caller's, e.g. derived from the projection of
+  ReducedSGD); parameters absent from `rates` stay frozen at their initial value (0 if
+  absent there too); gradients by autograd, so any callable `{name: tensor} -> tensor`
+  works. Returns a DataFrame indexed by `step` with the metric names + `loss`, ready to
+  overlay on `RunData.metrics`. All parameters at 0 is a fixed point. `tests/test_flow.py`
+  checks a quadratic loss against its closed form, freezing, and descent.
 Only `ansatz.py` and `variables.py` know the ansatz; extending it = register the
 parameter + add its terms (and variables). `tests/test_theory.py` runs the model on
 `ansatz_matrices(op)` and requires `ansatz_logits(measure_variables(...))` to match to

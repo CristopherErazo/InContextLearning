@@ -12,9 +12,36 @@ Conventions (shared by every function of `icl.theory`):
 """
 from __future__ import annotations
 
+import numbers
+import re
+
 import torch
 
 from ..data import occurrence_counts
+
+_AT_LEAST = re.compile(r"^>=\s*(\d+)$")
+
+
+def check_condition(condition) -> None:
+    """Raise unless `condition` is None, an int, a non-empty list of ints or '>=k'."""
+    def is_integer(value):
+        return isinstance(value, numbers.Integral) and not isinstance(value, bool)
+    ok = (condition is None or is_integer(condition)
+          or (isinstance(condition, (list, tuple)) and condition and all(map(is_integer, condition)))
+          or (isinstance(condition, str) and _AT_LEAST.match(condition)))
+    if not ok:
+        raise ValueError(f"a condition must be None, an int, a list of ints or '>=k', got {condition!r}")
+
+
+def condition_mask(column: torch.Tensor, condition) -> torch.Tensor:
+    """Where `column` matches `condition`: None (everywhere), an int (==), a
+    list (in it) or '>=k' (>= k)."""
+    check_condition(condition)
+    if condition is None:
+        return torch.ones_like(column, dtype=torch.bool)
+    if isinstance(condition, str):
+        return column >= int(_AT_LEAST.match(condition).group(1))
+    return torch.isin(column, torch.as_tensor(condition, dtype=column.dtype, device=column.device).reshape(-1))
 
 
 class QueryTable(dict):
@@ -26,6 +53,7 @@ class QueryTable(dict):
         table["logits"]                          # a column, here (num_rows, V)
         table.num_rows
         table.select(mu=256, ell=[1, 2])         # rows with mu == 256 and ell in {1, 2}
+        table.select(ell=">=1")                  # rows with ell >= 1
         for (mu, ell), cluster in table.groups("mu", "ell"): ...
         table.to_numpy() / QueryTable.from_numpy(saved)    # plain dict of numpy arrays
         QueryTable.concatenate([table_1, table_2])
@@ -45,13 +73,11 @@ class QueryTable(dict):
                            for name, value in self.items()})
 
     def select(self, **conditions) -> "QueryTable":
-        """The rows whose column equals the value, or is in the list of values,
-        for every condition."""
+        """The rows that match every condition: column=value, column=[values]
+        or column=">=k" (see `condition_mask`)."""
         keep = torch.ones(self.num_rows, dtype=torch.bool)
-        for name, wanted in conditions.items():
-            column = self[name]
-            wanted = torch.as_tensor(wanted, dtype=column.dtype).reshape(-1).to(column.device)
-            keep &= torch.isin(column, wanted).cpu()
+        for name, condition in conditions.items():
+            keep &= condition_mask(self[name], condition).cpu()
         return self._take(keep)
 
     def groups(self, *columns):
