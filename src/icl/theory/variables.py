@@ -12,6 +12,12 @@ paper's names:
            earlier a) for every non-trigger token other than phi(a), as
            (num_rows, V-K-1) columns in the order of the `non_target` block
 
+`measure_variables` and `sample_variables` also return where the occurrences
+are, for a previous-token *profile* ("M_profile" in the order parameters):
+"N_keys" (n, max ell) the witness keys, "F_keys" (n, max f) the free target
+keys and "U_keys" (n, V-K-1, max count) the keys of each non-target token, as
+code positions of keys (1..mu-2), padded with 0.
+
 Three sources, all returning a `QueryTable` with "mu", "ell", these columns and
 the metadata "K", ready for `ansatz_logits`:
 
@@ -29,8 +35,30 @@ the output of another trigger (the `other_outputs` block) and r_b = m otherwise
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
+from ..data import occurrence_counts
 from .query_table import QueryTable, canonical_permutation, logit_blocks, trigger_queries
+
+KEY_COLUMNS = ("N_keys", "F_keys", "U_keys")
+
+
+def _packed(keys: torch.Tensor) -> torch.Tensor:
+    """(n, L) code positions, 0 where absent -> (n, max present), the positions
+    first and 0 as padding."""
+    width = max(int((keys > 0).sum(1).max().item()), 1)
+    return keys.sort(dim=1, descending=True).values[:, :width]
+
+
+def _concatenate_padded(parts: list[QueryTable]) -> QueryTable:
+    """`QueryTable.concatenate`, after padding the key columns of every part to
+    the same width with 0."""
+    for name in KEY_COLUMNS:
+        if name in parts[0]:
+            width = max(part[name].size(-1) for part in parts)
+            for part in parts:
+                part[name] = F.pad(part[name], (0, width - part[name].size(-1)))
+    return QueryTable.concatenate(parts)
 
 
 def measure_variables(batch: dict, mus=None, chunk: int = 8192, dtype=torch.float64) -> QueryTable:
@@ -69,6 +97,23 @@ def measure_variables(batch: dict, mus=None, chunk: int = 8192, dtype=torch.floa
             "P": is_key * earlier_queries_behind,                        # pairs with an earlier a
         }
         permutation = canonical_permutation(query_token, output_sets, K, V)
+        # where the occurrences are, for a profile: witness keys (one after each earlier a),
+        # free target keys, and the keys of each non-target token in canonical order
+        target_token = output_sets.gather(1, query_token[:, None])
+        after_query = torch.zeros_like(is_key)
+        after_query[:, 1:] = tokens[:, :-1] == query_token[:, None]
+        is_free_target = is_key & (tokens == target_token) & ~after_query
+        slot = torch.empty_like(permutation).scatter_(1, permutation, torch.arange(V, device=inputs.device).expand_as(permutation))
+        slot_of_key = slot.gather(1, tokens)
+        is_token_key = is_key & (slot_of_key >= K) & (slot_of_key < V - 1)
+        rank = occurrence_counts(torch.where(is_token_key, tokens, V)) - 1      # occurrence number among its keys
+        rows, columns = torch.where(is_token_key)
+        width = int(rank[rows, columns].max().item()) + 1 if len(rows) else 1
+        U_keys = torch.zeros(len(sequence_index), V - K - 1, width, dtype=torch.long, device=inputs.device)
+        U_keys[rows, slot_of_key[rows, columns] - K, rank[rows, columns]] = columns
+        keys = {"N_keys": _packed(torch.where(is_earlier_query, code_position + 1, 0)),
+                "F_keys": _packed(torch.where(is_free_target, code_position, 0)),
+                "U_keys": U_keys}
         per_token = {}
         for name, weight in weight_per_key.items():                     # sum of the weight over each token's keys
             totals = torch.zeros(len(sequence_index), V, dtype=dtype, device=inputs.device)
@@ -83,9 +128,10 @@ def measure_variables(batch: dict, mus=None, chunk: int = 8192, dtype=torch.floa
             "U_bar": per_token["U"][:, non_target],
             "W_bar": per_token["W"][:, non_target],
             "P_bar": per_token["P"][:, non_target],
+            **keys,
             "K": K,
         }))
-    return QueryTable.concatenate(parts)
+    return _concatenate_padded(parts)
 
 
 COUNT_LAWS = ("poisson", "multinomial")
@@ -160,6 +206,8 @@ def sample_variables(mu, ell, V: int, K: int, num_samples: int | None = None, co
     "multinomial" draws them jointly on the mu - 2 - 2 ell available keys, which
     keeps their weak anti-correlation (matters for sums over many tokens).
     Rows are drawn `chunk` at a time; pass a `torch.Generator` for reproducibility.
+    The key columns place every occurrence at a uniform key of the query, the
+    witness keys at the same relative positions x_k as R, W and P.
     """
     if counts not in COUNT_LAWS:
         raise ValueError(f"counts must be one of {COUNT_LAWS}, got {counts!r}")
@@ -167,7 +215,16 @@ def sample_variables(mu, ell, V: int, K: int, num_samples: int | None = None, co
     parts = []
     for start in range(0, len(mu), chunk):
         parts.append(_sample_chunk(mu[start:start + chunk], ell[start:start + chunk], V, K, counts, generator, dtype))
-    return QueryTable.concatenate(parts)
+    return _concatenate_padded(parts)
+
+
+def _to_keys(positions: torch.Tensor, is_real: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
+    """Positions in (0, 1) of a query at mu -> uniform keys, code positions
+    1..mu-2 (0 where not real or mu has no keys). A witness key is the key after
+    the earlier a at the same relative position."""
+    n_keys = (mu - 2).clamp(min=0).view(-1, *([1] * (positions.dim() - 1)))
+    keys = 1 + (torch.where(is_real, positions, 0.0) * n_keys).long().clamp(max=n_keys - 1)
+    return torch.where(is_real & (n_keys > 0), keys, 0)
 
 
 def _sample_chunk(mu, ell, V, K, counts, generator, dtype) -> QueryTable:
@@ -201,7 +258,10 @@ def _sample_chunk(mu, ell, V, K, counts, generator, dtype) -> QueryTable:
     P_bar = (_earlier_queries_behind(query_positions, token_positions) * is_token).sum(-1)
 
     return QueryTable({"mu": mu, "ell": ell, "N": ell_float, "F": free_targets, "R": R, "W": W, "P": P,
-                       "U_bar": occurrences, "W_bar": W_bar, "P_bar": P_bar, "K": K})
+                       "U_bar": occurrences, "W_bar": W_bar, "P_bar": P_bar,
+                       "N_keys": _to_keys(query_positions, is_query, mu),
+                       "F_keys": _to_keys(target_positions, is_target, mu),
+                       "U_keys": _to_keys(token_positions, is_token, mu), "K": K})
 
 
 def mean_variables(mu, ell, V: int, K: int, dtype=torch.float64, device=None) -> QueryTable:

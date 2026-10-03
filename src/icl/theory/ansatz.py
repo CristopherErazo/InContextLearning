@@ -13,6 +13,13 @@ tests/test_theory.py checks the new formula against the model itself.
 
 Names follow the paper: M_on, Q_T, ... are the order parameters, and N, F, R,
 W, P, U_bar, W_bar, P_bar the sequence variables of its Table 1.
+
+The previous-token diagonal can also be a *profile*
+(paper/scratch/2026-10-03-1539_profile-ansatz.tex): give
+`order_params["M_profile"]`, a tensor of length L-1 in the convention of
+`M.diagonal(-1)` (entry i is M[i+1, i], the key at code position i+1). It
+replaces M_on in the logits and in `ansatz_matrices`. M_on stays the scalar that
+is measured and logged (the mean of the profile).
 """
 from __future__ import annotations
 
@@ -49,6 +56,8 @@ def _all_trigger_rows(L, V, K):        # Gamma_{tau b}, tau a trigger, every b
     return _trigger_rows(V, K).clone()
 
 
+PROFILE = "M_profile"                  # optional key: the previous-token diagonal as a tensor
+
 # name -> (matrix, support(L, V, K) -> bool mask of that matrix's shape).
 # The value of an order parameter is the mean of its matrix over its support.
 ORDER_PARAMS = {
@@ -80,42 +89,84 @@ def measure_order_params(matrices: dict, K: int) -> dict[str, float]:
 def ansatz_matrices(order_params: dict, L: int, V: int, K: int, dtype=torch.float64) -> dict[str, torch.Tensor]:
     """The matrices {"M", "Q", "G"} of the ansatz: each registered order
     parameter's value on its support, zero everywhere else (a parameter missing
-    from `order_params` counts as 0). `measure_order_params` of the result gives
-    `order_params` back."""
+    from `order_params` counts as 0), and the profile on the sub-diagonal of M if
+    `order_params["M_profile"]` is given. `measure_order_params` of the result
+    gives the scalar order parameters back (M_on as the mean of the profile)."""
     shapes = {"M": (L, L), "Q": (V, V), "G": (V, V)}
     matrices = {name: torch.zeros(shape, dtype=dtype) for name, shape in shapes.items()}
     for name, (matrix_name, support) in ORDER_PARAMS.items():
         matrices[matrix_name][support(L, V, K)] = float(order_params.get(name, 0.0))
+    if PROFILE in order_params:
+        matrices["M"].diagonal(-1).copy_(_check_profile(order_params[PROFILE], L).detach())
     return matrices
+
+
+def _check_profile(profile, L: int) -> torch.Tensor:
+    profile = torch.as_tensor(profile)
+    if profile.shape != (L - 1,):
+        raise ValueError(f"M_profile must have shape ({L - 1},) (the sub-diagonal of M), got {tuple(profile.shape)}")
+    return profile
+
+
+def _previous_token_sums(variables: QueryTable, order_params: dict, L: int, dtype, device) -> dict:
+    """The previous-token diagonal summed over the keys each logit uses:
+    "witness" (the keys after the earlier a's), "free" (the free target keys),
+    "tokens" (each non-target token's keys, (n, V-K-1)) and "all" (every key).
+
+    Without a profile these are M_on times the counts. With a profile they read
+    it at the keys stored in the variables ("N_keys", "F_keys", "U_keys", code
+    positions, 0 = padding); a table without keys (`mean_variables`) gets the
+    count times the mean of the profile over the query's keys."""
+    n_keys = (variables["mu"] - 2).clamp(min=0)
+    if PROFILE not in order_params:
+        M_on = torch.as_tensor(order_params.get("M_on", 0.0), dtype=dtype, device=device)
+        return {"witness": M_on * variables["N"], "free": M_on * variables["F"],
+                "tokens": M_on * variables["U_bar"], "all": M_on * n_keys.to(dtype)}
+    profile = _check_profile(order_params[PROFILE], L).to(dtype=dtype, device=device)
+    by_code_position = torch.cat([profile.new_zeros(1), profile])      # key at code position j -> M[j, j-1]
+    total = by_code_position.cumsum(0)[n_keys]                            # keys are code positions 1..mu-2
+    window_mean = total / n_keys.clamp(min=1).to(dtype)
+    sums = {"all": total}
+    for name, keys, count in (("witness", "N_keys", "N"), ("free", "F_keys", "F"), ("tokens", "U_keys", "U_bar")):
+        if keys in variables:
+            sums[name] = by_code_position[variables[keys]].sum(-1)
+        else:
+            mean = window_mean if variables[count].dim() == 1 else window_mean[:, None]
+            sums[name] = variables[count] * mean
+    return sums
 
 
 def ansatz_logits(variables: QueryTable, order_params: dict, beta: float, L: int) -> torch.Tensor:
     """(num_rows, V) logits of the ansatz in the canonical layout (eq.
     logit_classes_explicit), from the sequence variables (measured or sampled,
-    see variables.py) and the order parameters ({name: float or 0-d tensor}; a
-    missing one counts as 0). Differentiable in the order parameters.
+    see variables.py) and the order parameters ({name: float or 0-d tensor},
+    plus optionally "M_profile"; a missing one counts as 0). Differentiable in
+    the order parameters, the profile included.
 
-        h_on  = beta/L G_on [M_on Q_on N + M_on Q_T F + M_off Q_T W + M_off dQ P]
-        h_T   = beta/L G_T  [M_on Q_T n_keys + M_off Q_T sum_keys + M_on dQ N + M_off dQ R]
-        h_b   = beta/L G_on [M_on Q_T U_bar_b + M_off Q_T W_bar_b + M_off dQ P_bar_b]
+        h_on  = beta/L G_on [Q_on N~ + Q_T F~ + M_off Q_T W + M_off dQ P]
+        h_T   = beta/L G_T  [Q_T M_all + M_off Q_T sum_keys + dQ N~ + M_off dQ R]
+        h_b   = beta/L G_on [Q_T U~_b + M_off Q_T W_bar_b + M_off dQ P_bar_b]
 
-    with dQ = Q_on - Q_T, n_keys = max(mu-2, 0) the number of keys and
-    sum_keys = n_keys (n_keys-1) / 2 the sum over the keys of (nu - 2).
+    with dQ = Q_on - Q_T and sum_keys = n_keys (n_keys-1) / 2, n_keys = max(mu-2, 0).
+    N~, F~, U~_b, M_all are the previous-token diagonal summed over the witness
+    keys, the free target keys, the keys of b and all the keys: M_on N, M_on F,
+    M_on U_bar_b, M_on n_keys without a profile (see `_previous_token_sums`).
     """
     dtype, device = variables["N"].dtype, variables["N"].device
     params = {name: torch.as_tensor(order_params.get(name, 0.0), dtype=dtype, device=device)
               for name in ORDER_PARAMS}
-    M_on, M_off, Q_on, Q_T, G_on, G_T = (params[name] for name in ("M_on", "M_off", "Q_on", "Q_T", "G_on", "G_T"))
+    M_off, Q_on, Q_T, G_on, G_T = (params[name] for name in ("M_off", "Q_on", "Q_T", "G_on", "G_T"))
     delta_Q = Q_on - Q_T
     prefactor = beta / L
     n_keys = (variables["mu"] - 2).clamp(min=0).to(dtype)
     sum_keys = n_keys * (n_keys - 1) / 2
+    on = _previous_token_sums(variables, order_params, L, dtype, device)
 
-    N, F, R, W, P = (variables[name] for name in ("N", "F", "R", "W", "P"))
-    h_target = prefactor * G_on * (M_on * Q_on * N + M_on * Q_T * F + M_off * Q_T * W + M_off * delta_Q * P)
-    h_trigger = prefactor * G_T * (M_on * Q_T * n_keys + M_off * Q_T * sum_keys
-                                   + M_on * delta_Q * N + M_off * delta_Q * R)
-    h_non_target = prefactor * G_on * (M_on * Q_T * variables["U_bar"] + M_off * Q_T * variables["W_bar"]
+    R, W, P = (variables[name] for name in ("R", "W", "P"))
+    h_target = prefactor * G_on * (Q_on * on["witness"] + Q_T * on["free"] + M_off * Q_T * W + M_off * delta_Q * P)
+    h_trigger = prefactor * G_T * (Q_T * on["all"] + M_off * Q_T * sum_keys
+                                   + delta_Q * on["witness"] + M_off * delta_Q * R)
+    h_non_target = prefactor * G_on * (Q_T * on["tokens"] + M_off * Q_T * variables["W_bar"]
                                        + M_off * delta_Q * variables["P_bar"])
     K = int(variables["K"])
     return torch.cat([h_trigger[:, None].expand(-1, K), h_non_target, h_target[:, None]], dim=1)

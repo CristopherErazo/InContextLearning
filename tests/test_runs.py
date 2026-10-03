@@ -53,6 +53,9 @@ def test_matrices_round_trip(tmp_path, backend):
     assert data.config.model_args.backend == backend and data.config.data_args.K == K
     assert list(data.metrics.index) == [0, 7] and data.metrics.loc[7, "loss"] == 7.0
     torch.testing.assert_close(data.matrices("first")["Q"], data.matrices(0)["Q"])
+    with_profile = data.order_params(7, profile=True)
+    torch.testing.assert_close(with_profile["M_profile"], data.matrices(7)["M"].double().diagonal(-1))
+    assert with_profile["M_on"] == pytest.approx(with_profile["M_profile"].mean().item())
     for step, which in ((0, "first"), (7, "last")):
         loaded = data.model(which)
         assert loaded.matrices()["M"].dtype == torch.float64

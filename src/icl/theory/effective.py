@@ -32,7 +32,7 @@ import torch
 from scipy.integrate import solve_ivp
 from scipy.stats import poisson
 
-from .ansatz import ORDER_PARAMS, ansatz_logits
+from .ansatz import ORDER_PARAMS, PROFILE, ansatz_logits
 from .query_table import QueryTable, cluster_cross_entropy, condition_mask
 from .variables import COUNT_LAWS, mean_variables, sample_variables
 
@@ -113,14 +113,20 @@ class EffectiveLoss:
         q = self.trigger_probability
         return (1 - q) * math.log(self.V) + q * trigger_loss
 
-    def value_and_grad(self, order_params: dict) -> tuple[float, dict[str, float]]:
+    def value_and_grad(self, order_params: dict) -> tuple[float, dict]:
         """The loss and its gradient with respect to every registered order
-        parameter (missing ones are evaluated at 0)."""
+        parameter (missing ones are evaluated at 0), and with respect to the
+        profile if "M_profile" is given (a tensor; M_on then does not enter the
+        logits and its gradient is 0)."""
         params = {name: torch.tensor(float(order_params.get(name, 0.0)), dtype=self.dtype, requires_grad=True)
                   for name in ORDER_PARAMS}
+        if PROFILE in order_params:
+            params[PROFILE] = torch.as_tensor(order_params[PROFILE], dtype=self.dtype).detach().clone().requires_grad_(True)
         value = self(params)
-        gradients = torch.autograd.grad(value, list(params.values()))
-        return value.item(), {name: gradient.item() for name, gradient in zip(params, gradients)}
+        gradients = torch.autograd.grad(value, list(params.values()), allow_unused=True)
+        return value.item(), {name: (torch.zeros_like(params[name]) if gradient is None else gradient).detach()
+                              if params[name].dim() else (0.0 if gradient is None else gradient.item())
+                              for name, gradient in zip(params, gradients)}
 
     def breakdown(self, order_params: dict) -> dict:
         """The loss by part, comparable with the logged metrics of the same names
@@ -158,6 +164,11 @@ def integrate(loss, initial_order_params: dict, rates: dict, steps: float, recor
 
     loss: any callable {name: 0-d tensor} -> 0-d tensor, e.g. an EffectiveLoss.
     rates: {name: rate per SGD step}, derived by the caller.
+
+    The profile can move too: put "M_profile" (a tensor of length L-1) in
+    `initial_order_params` and in `rates`, with one rate for every entry or a
+    tensor of rates. Its trajectory is the column "M_profile" (one numpy array
+    per row), and "M_on" then reports the mean of the profile.
     steps: the flow runs over [0, steps]; record_steps: where to report it
     (default 201 evenly spaced points; e.g. `run.metrics.index` to overlay a run).
     method, rtol, atol, solver_options: passed to scipy.integrate.solve_ivp
@@ -171,27 +182,37 @@ def integrate(loss, initial_order_params: dict, rates: dict, steps: float, recor
     """
     if not rates:
         raise ValueError("rates is empty: name at least one order parameter to move")
-    unknown = set(rates) - set(ORDER_PARAMS)
+    unknown = set(rates) - set(ORDER_PARAMS) - {PROFILE}
     if unknown:
         raise ValueError(f"rates for unregistered order parameters: {sorted(unknown)}")
-    names = list(ORDER_PARAMS)
+    names = list(ORDER_PARAMS) + ([PROFILE] if PROFILE in initial_order_params or PROFILE in rates else [])
+    if PROFILE in rates and PROFILE not in initial_order_params:
+        raise ValueError("a moving M_profile needs its initial value in initial_order_params")
+
+    def initial(name) -> np.ndarray:
+        value = initial_order_params.get(name, 0.0)
+        return np.asarray(value.detach().cpu() if torch.is_tensor(value) else value, dtype=float).reshape(-1)
+
     moving = [name for name in names if name in rates]
-    fixed = {name: float(initial_order_params.get(name, 0.0)) for name in names if name not in rates}
-    rate_vector = np.array([float(rates[name]) for name in moving])
+    fixed = {name: (torch.as_tensor(initial(name)) if name == PROFILE else float(initial(name)[0]))
+             for name in names if name not in rates}
+    sizes = [initial(name).size for name in moving]
+    rate_vector = np.concatenate([np.broadcast_to(np.asarray(rates[name], dtype=float).reshape(-1), (size,))
+                                  for name, size in zip(moving, sizes)])
 
     def order_params_from(values) -> dict:
         params = dict(fixed)
-        params.update({name: value for name, value in zip(moving, values)})
+        for name, piece in zip(moving, torch.split(torch.as_tensor(values), sizes)):
+            params[name] = piece if name == PROFILE else piece[0]
         return params
 
     def velocity(step, values):
-        params = [torch.tensor(value, dtype=torch.float64, requires_grad=True) for value in values]
-        value = loss(order_params_from(params))
-        gradients = torch.autograd.grad(value, params)
-        return -rate_vector * np.array([gradient.item() for gradient in gradients])
+        flat = torch.tensor(values, dtype=torch.float64, requires_grad=True)
+        (gradient,) = torch.autograd.grad(loss(order_params_from(flat)), flat)
+        return -rate_vector * gradient.numpy()
 
     record_steps = np.linspace(0, steps, 201) if record_steps is None else np.asarray(record_steps, dtype=float)
-    start = np.array([float(initial_order_params.get(name, 0.0)) for name in moving])
+    start = np.concatenate([initial(name) for name in moving])
     solution = solve_ivp(velocity, (0.0, float(steps)), start, method=method, t_eval=record_steps,
                          rtol=rtol, atol=atol, **solver_options)
     if not solution.success:
@@ -201,5 +222,10 @@ def integrate(loss, initial_order_params: dict, rates: dict, steps: float, recor
     with torch.no_grad():
         for step, values in zip(solution.t, solution.y.T):
             params = order_params_from(values)
-            rows.append({"step": step, **params, "loss": float(loss(params))})
+            row = {"step": step, "loss": float(loss(params))}
+            for name, value in params.items():
+                row[name] = value.numpy().copy() if name == PROFILE else float(value)
+            if PROFILE in params:
+                row["M_on"] = float(params[PROFILE].mean())
+            rows.append(row)
     return pd.DataFrame(rows, columns=["step", *names, "loss"]).set_index("step")

@@ -221,6 +221,22 @@ triggers (by trigger), `[2K-1,V-1)` the rest (by id), `V-1` the target.
   works. Returns a DataFrame indexed by `step` with the metric names + `loss`, ready to
   overlay on `RunData.metrics`. All parameters at 0 is a fixed point. `tests/test_flow.py`
   checks a quadratic loss against its closed form, freezing, and descent.
+- **Profile** (paper/scratch/2026-10-03-1539_profile-ansatz.tex): the previous-token
+  diagonal can be a tensor, `order_params["M_profile"]` of length L-1 in the
+  `M.diagonal(-1)` convention (entry i = M[i+1, i]); it replaces M_on in
+  `ansatz_logits` and `ansatz_matrices` (M_on stays the logged scalar mean; the key
+  `PROFILE` names it). The logits then read the profile at the keys of each occurrence:
+  `measure_variables` / `sample_variables` return "N_keys" (witness keys), "F_keys"
+  (free target keys), "U_keys" ((n, V-K-1, c) keys of each non-target token), as code
+  positions 1..mu-2 padded with 0; `mean_variables` has no keys, so it uses the count
+  times the mean of the profile over the query's keys. Constant profile == scalar
+  ansatz on every source. `EffectiveLoss` works unchanged (differentiable in the
+  profile), `value_and_grad` returns a tensor gradient for it, `integrate` can move it
+  (rate per entry or shared; trajectory in column "M_profile", "M_on" = its mean), and
+  `RunData.order_params(step, profile=True)` adds the measured profile.
+  `tests/test_profile.py`: exactness with a random profile, constant profile == scalar,
+  keys vs counts, sampled witness sums vs (ell mean, ell var) of the profile, gradcheck,
+  flow.
 Only `ansatz.py` and `variables.py` know the ansatz; extending it = register the
 parameter + add its terms (and variables). `tests/test_theory.py` runs the model on
 `ansatz_matrices(op)` and requires `ansatz_logits(measure_variables(...))` to match to
