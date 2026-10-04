@@ -12,7 +12,7 @@ MIN_TOTAL_STEPS = 100  # lower bound on a budget derived from extra_args.alpha_s
 class ModelArgs:
     vocab_size: int = 128 # Vocabulary size
     d_model: int = 8000 # Model dimension
-    seq_len: int = 256 # Sequence length
+    seq_len: int = 512 # Sequence length
     lin_attn: bool = True  # Whether to use linear attention or not
     beta: float = 0.25  # Scaling factor for output logits
     sigma_0: float = 1.0  # Initial std dev for parameter initialization
@@ -25,6 +25,10 @@ class ModelArgs:
     backend: str = "reduced"
     init: str = "full"  # reduced only: "full" (compose a MinimalTransformer: same draw) or "sample" (any d)
     infinite_d: bool = False  # reduced + init="sample" only: take d_model -> inf (d_model is then ignored)
+    # reduced only: replace the drawn (m, q, g) by their extended-ansatz projection (icl.theory):
+    # the same order parameters, without the spread of the entries around them
+    ansatz_init: bool = False
+    ansatz_keep_spread: str = ""  # with ansatz_init: matrices kept as drawn, any of "M", "Q", "G" (e.g. "QG")
 
 
 @dataclass
@@ -60,6 +64,7 @@ class ExtraArgs:
     alpha_steps: float | None = None  # Scaling factor for total steps
     total_steps: int = field(default=3000)  # Total number of training steps
     stop_at_accuracy: float | None = None  # Stop once top1_accuracy reaches this (None = never)
+    stop_at_loss: float | None = None  # Stop once the loss falls to this (None = never)
     n_prints: int = 50  # Metric evaluation frequency
     n_prints_model: int = 10  # Model checkpoint frequency
     print_scale: str = 'linear'  # Scale for evaluation: log or linear

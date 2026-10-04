@@ -137,3 +137,37 @@ def test_flow_of_the_profile():
     assert (flow["G_on"] == 0.0).all()                                   # not moving
     frozen = integrate(loss, dict(start, M_profile=target.clone()), {"Q_on": 0.05}, steps=10, record_steps=[0, 10])
     assert frozen.loc[10, "M_profile"] == pytest.approx(target.numpy())  # a fixed profile stays put
+
+
+def test_flow_inside_a_profile_family():
+    x = torch.arange(2, L + 1, dtype=torch.float64) / L
+    basis = torch.stack([torch.ones_like(x), x], dim=1)                 # the linear family m = theta_0 + theta_1 x
+    target, curvature, rate = torch.cos(3 * x), 0.5, 0.02               # not in the family
+
+    def loss(order_params):
+        return curvature * ((order_params["M_profile"] - target) ** 2).sum()
+
+    theta0 = torch.tensor([1.0, -1.0], dtype=torch.float64)
+    flow = integrate(loss, {}, {"M_profile": rate}, steps=40, record_steps=[0, 20, 40], rtol=1e-10, atol=1e-12,
+                     profile_family=(lambda theta: basis @ theta, theta0))
+    best = torch.linalg.lstsq(basis, target[:, None]).solution[:, 0]    # the projected flow relaxes to the fit
+    for step in (20, 40):
+        expected = best + np.exp(-2 * curvature * rate * step) * (theta0 - best)
+        assert flow.loc[step, "M_profile_params"] == pytest.approx(expected.numpy(), rel=1e-6)
+        assert flow.loc[step, "M_profile"] == pytest.approx((basis @ expected).numpy(), rel=1e-6)
+    with pytest.raises(ValueError):
+        integrate(loss, {"M_profile": target}, {"M_profile": rate}, steps=1, profile_family=(lambda t: basis @ t, theta0))
+
+
+def test_the_constant_family_is_the_scalar_flow():
+    loss = EffectiveLoss(V, L, K, 0.25, method="mean", mus=[8, 14, 20])
+    start = {"M_on": 0.5, "Q_on": 2.0, "G_on": 1.5, "Q_T": -0.3}
+    rate = 0.4
+    kwargs = dict(steps=30, record_steps=[0, 15, 30], rtol=1e-10, atol=1e-12)
+    scalar = integrate(loss, start, {"M_on": rate / (L - 1), "Q_on": 0.1}, **kwargs)
+    family = integrate(loss, {name: value for name, value in start.items() if name != "M_on"},
+                       {"M_profile": rate, "Q_on": 0.1}, **kwargs,
+                       profile_family=(lambda theta: theta.expand(L - 1), torch.tensor([0.5])))
+    for name in ("M_on", "Q_on", "loss"):
+        assert family[name].to_numpy() == pytest.approx(scalar[name].to_numpy(), rel=1e-7)
+    assert family.loc[30, "M_profile_params"][0] == pytest.approx(scalar.loc[30, "M_on"], rel=1e-7)

@@ -151,7 +151,10 @@ exactly; Adam does not, so the backend refuses anything but SGD, and also
 `MinimalTransformer` (the same random draw a full run makes, so old runs can be
 reproduced; the d×d weights have to fit once), and `"sample"` draws the Gram matrices
 (Bartlett) and initial m, q, g from their joint law directly (any d ≥ max(L, V), and
-`model_args.infinite_d=true`). `tests/test_reduced.py` checks the full and reduced SGD
+`model_args.infinite_d=true`). `model_args.ansatz_init=true` then replaces the drawn m, q, g
+by their extended-ansatz projection (`ansatz_matrices(measure_order_params(...))`: the
+same order parameters, no spread; `model_args.ansatz_keep_spread="QG"` keeps the named
+matrices as drawn); `build_model` needs `K=` for it. `tests/test_reduced.py` checks the full and reduced SGD
 trajectories agree to 1e-9 in float64 and the sampled init has the full init's
 moments. Rerunning `large_d_sweep_1/run_005` (d=2048, L=512) with `init=full` gave
 the same early-stop step with metrics equal to ~1e-4 relative (TF32), at 25 vs 356
@@ -219,7 +222,12 @@ triggers (by trigger), `[2K-1,V-1)` the rest (by id), `V-1` the target.
   ReducedSGD); parameters absent from `rates` stay frozen at their initial value (0 if
   absent there too); gradients by autograd, so any callable `{name: tensor} -> tensor`
   works. Returns a DataFrame indexed by `step` with the metric names + `loss`, ready to
-  overlay on `RunData.metrics`. All parameters at 0 is a fixed point. `tests/test_flow.py`
+  overlay on `RunData.metrics`. All parameters at 0 is a fixed point.
+  `asymptotic_loss(V, L, K)` is the manuscript's L^infty and `learning_time(loss, V, L, K,
+  fraction=0.2)` the first step (interpolated) at which a loss series has gone `fraction`
+  of the way from log V to it: the learning time used for runs, controls and flows alike
+  (top-1 accuracy is meaningless without the spread of the entries: the argmax of
+  deterministic ansatz logits only sees their signs). `tests/test_flow.py`
   checks a quadratic loss against its closed form, freezing, and descent.
 - **Profile** (paper/scratch/2026-10-03-1539_profile-ansatz.tex): the previous-token
   diagonal can be a tensor, `order_params["M_profile"]` of length L-1 in the
@@ -232,7 +240,10 @@ triggers (by trigger), `[2K-1,V-1)` the rest (by id), `V-1` the target.
   times the mean of the profile over the query's keys. Constant profile == scalar
   ansatz on every source. `EffectiveLoss` works unchanged (differentiable in the
   profile), `value_and_grad` returns a tensor gradient for it, `integrate` can move it
-  (rate per entry or shared; trajectory in column "M_profile", "M_on" = its mean), and
+  (rate per entry or shared; trajectory in column "M_profile", "M_on" = its mean) or move
+  it inside a family, `profile_family=(function, theta0)`: theta follows the least-squares
+  projection of the entry-wise flow, `-rate (J^T J)^{-1} d loss/d theta` (column
+  "M_profile_params"; the constant family == the M_on flow at rate/(L-1)), and
   `RunData.order_params(step, profile=True)` adds the measured profile.
   `tests/test_profile.py`: exactness with a random profile, constant profile == scalar,
   keys vs counts, sampled witness sums vs (ell mean, ell var) of the profile, gradcheck,
@@ -310,6 +321,10 @@ dashboard / rewind machinery is not needed or to check a result independently of
 When changing what a run evaluates or saves, change both scripts. It is the only script
 that runs `backend=reduced`. Both pass `extra_args.eval_chunk` (default: the training
 batch size, which needs less memory than a training step) to the `Evaluator`.
+`extra_args.stop_at_loss` stops on the loss like `stop_at_accuracy` does on the
+accuracy. `scripts/L_sweep_controls.py` (ansatz-init reruns of the d = inf `L_sweep_reduced`
+runs) and `scripts/L_sweep_flows.py` (effective flows of the signal / trigger / extended
+variants, to `data/effective_L_sweep/`) feed `notebooks/26-10-04_L_sweep_effective.ipynb`.
 `track_results` records `train_time` and `eval_time` separately, `ms_per_step` of
 training alone, and `peak_gpu_mem_gib`.
 

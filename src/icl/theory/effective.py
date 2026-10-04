@@ -151,8 +151,39 @@ def trigger_loss(clusters: QueryTable, ell=None) -> float:
     return ((weights * clusters["cross_entropy"][selected]).sum() / weights.sum()).item()
 
 
+def asymptotic_loss(V: int, L: int, K: int) -> float:
+    """The manuscript's L^infty: the loss of a perfect induction head, the floor
+    log V on the positions it cannot solve, with lambda = L / (V + K) and
+    rho = K / V,
+
+        L^infty = (1 - omega_bar) log V + rho/(1+rho) log(1-rho) (1 - e^-lambda) / lambda,
+        omega_bar = rho/(1+rho) (lambda - 1 + e^-lambda) / lambda.
+
+    "How far training got" is then (log V - loss) / (log V - L^infty)."""
+    rho, lam = K / V, L / (V + K)
+    trigger = rho / (1 + rho)
+    omega_bar = trigger * (lam - 1 + math.exp(-lam)) / lam
+    return (1 - omega_bar) * math.log(V) + trigger * math.log(1 - rho) * (1 - math.exp(-lam)) / lam
+
+
+def learning_time(loss: pd.Series, V: int, L: int, K: int, fraction: float = 0.2) -> float:
+    """The first step at which `loss` (indexed by step: a run's logged loss or an
+    `integrate` column) has gone `fraction` of the way from log V to
+    `asymptotic_loss`, interpolated linearly between steps; NaN if never."""
+    progress = (math.log(V) - loss.to_numpy(dtype=float)) / (math.log(V) - asymptotic_loss(V, L, K))
+    reached = np.flatnonzero(progress >= fraction)
+    if not len(reached):
+        return math.nan
+    steps, first = loss.index.to_numpy(dtype=float), reached[0]
+    if first == 0:
+        return steps[0]
+    before, after = progress[first - 1], progress[first]
+    return steps[first - 1] + (fraction - before) / (after - before) * (steps[first] - steps[first - 1])
+
+
 def integrate(loss, initial_order_params: dict, rates: dict, steps: float, record_steps=None,
-              method: str = "LSODA", rtol: float = 1e-6, atol: float = 1e-9, **solver_options) -> pd.DataFrame:
+              method: str = "LSODA", rtol: float = 1e-6, atol: float = 1e-9, profile_family=None,
+              **solver_options) -> pd.DataFrame:
     """The gradient flow of `loss` in the order parameters, in units of SGD steps:
 
         d theta_i / d step = - rates[i] * d loss / d theta_i     for every name in `rates`,
@@ -169,6 +200,19 @@ def integrate(loss, initial_order_params: dict, rates: dict, steps: float, recor
     `initial_order_params` and in `rates`, with one rate for every entry or a
     tensor of rates. Its trajectory is the column "M_profile" (one numpy array
     per row), and "M_on" then reports the mean of the profile.
+
+    Or the profile can move inside a family: profile_family = (function, theta0),
+    with function(theta) -> the profile (a differentiable torch function of a
+    (p,) tensor, returning length L-1) and theta0 the initial parameters; then
+    "M_profile" goes in `rates` (one scalar rate per entry, e.g. alpha_lr at
+    d = inf) but not in `initial_order_params`. theta follows the projection of
+    the entry-wise flow d m / d step = - rate * d loss / d m on the family
+    (least squares), with J = d profile / d theta of full rank:
+
+        d theta / d step = - rate * (J^T J)^{-1} d loss / d theta.
+
+    For the constant family this is the M_on flow with rate / (L-1). theta is
+    the column "M_profile_params".
     steps: the flow runs over [0, steps]; record_steps: where to report it
     (default 201 evenly spaced points; e.g. `run.metrics.index` to overlay a run).
     method, rtol, atol, solver_options: passed to scipy.integrate.solve_ivp
@@ -186,6 +230,14 @@ def integrate(loss, initial_order_params: dict, rates: dict, steps: float, recor
     if unknown:
         raise ValueError(f"rates for unregistered order parameters: {sorted(unknown)}")
     names = list(ORDER_PARAMS) + ([PROFILE] if PROFILE in initial_order_params or PROFILE in rates else [])
+    profile_function = None
+    if profile_family is not None:
+        profile_function, theta0 = profile_family
+        if PROFILE not in rates or PROFILE in initial_order_params or np.size(rates[PROFILE]) != 1:
+            raise ValueError("with a profile_family, give M_profile one scalar rate and no initial value "
+                             "(the family's theta0 is the start)")
+        initial_order_params = dict(initial_order_params)
+        initial_order_params[PROFILE] = torch.as_tensor(theta0, dtype=torch.float64)
     if PROFILE in rates and PROFILE not in initial_order_params:
         raise ValueError("a moving M_profile needs its initial value in initial_order_params")
 
@@ -203,12 +255,22 @@ def integrate(loss, initial_order_params: dict, rates: dict, steps: float, recor
     def order_params_from(values) -> dict:
         params = dict(fixed)
         for name, piece in zip(moving, torch.split(torch.as_tensor(values), sizes)):
-            params[name] = piece if name == PROFILE else piece[0]
+            if name != PROFILE:
+                params[name] = piece[0]
+            else:
+                params[name] = piece if profile_function is None else profile_function(piece)
         return params
+
+    if profile_function is not None:                    # where theta sits in the flat vector
+        offset = sum(sizes[: moving.index(PROFILE)])
+        theta_slice = slice(offset, offset + sizes[moving.index(PROFILE)])
 
     def velocity(step, values):
         flat = torch.tensor(values, dtype=torch.float64, requires_grad=True)
         (gradient,) = torch.autograd.grad(loss(order_params_from(flat)), flat)
+        if profile_function is not None:                # project the entry-wise flow on the family
+            jacobian = torch.autograd.functional.jacobian(profile_function, flat.detach()[theta_slice])
+            gradient[theta_slice] = torch.linalg.solve(jacobian.T @ jacobian, gradient[theta_slice])
         return -rate_vector * gradient.numpy()
 
     record_steps = np.linspace(0, steps, 201) if record_steps is None else np.asarray(record_steps, dtype=float)
@@ -227,5 +289,8 @@ def integrate(loss, initial_order_params: dict, rates: dict, steps: float, recor
                 row[name] = value.numpy().copy() if name == PROFILE else float(value)
             if PROFILE in params:
                 row["M_on"] = float(params[PROFILE].mean())
+            if profile_function is not None:
+                row["M_profile_params"] = values[theta_slice].copy()
             rows.append(row)
-    return pd.DataFrame(rows, columns=["step", *names, "loss"]).set_index("step")
+    extra = ["M_profile_params"] if profile_function is not None else []
+    return pd.DataFrame(rows, columns=["step", *names, *extra, "loss"]).set_index("step")

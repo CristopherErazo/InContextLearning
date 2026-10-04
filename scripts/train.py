@@ -15,7 +15,8 @@ sees the weights *before* the s-th update, so step 0 is the initial model and
 
 `extra_args.stop_at_accuracy` (default None) stops the run at the first scheduled
 evaluation whose `top1_accuracy` reaches the threshold; that step is the measured
-learning time. Its resolution is the scalar evaluation spacing, `total_steps/n_prints`.
+learning time. `extra_args.stop_at_loss` (default None) does the same when the
+loss falls to the threshold (e.g. a fraction of the way to `asymptotic_loss`). Its resolution is the scalar evaluation spacing, `total_steps/n_prints`.
 A non-finite evaluation loss stops the run unconditionally: the learning rate has
 blown the weights up and nothing after that point is meaningful. Both tests read the
 metrics already computed by the scheduled evaluation, so neither adds a device sync
@@ -53,6 +54,7 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
     total_steps = cfg.extra_args.total_steps
     track_artifacts = cfg.extra_args.track_artifacts
     stop_at = cfg.extra_args.stop_at_accuracy  # None disables early stopping
+    stop_at_loss = cfg.extra_args.stop_at_loss
     device = "cuda" if torch.cuda.is_available() else "cpu"
     # Where batches are drawn. "auto" follows the training device, which avoids the
     # host->device copy; see scripts/bench_data.py for which is faster on this machine.
@@ -63,7 +65,7 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
     precision_msg = set_matmul_precision(cfg.extra_args.matmul_precision)
 
     # ---- model, loss, optimizer ----
-    model, optimizer, opt_msg = build_model(cfg.model_args, cfg.optim_args, device)
+    model, optimizer, opt_msg = build_model(cfg.model_args, cfg.optim_args, device, K=K)
     loss_fn = torch.nn.CrossEntropyLoss()
 
     # ---- fixed test batch, probes, schedules ----
@@ -141,8 +143,11 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
                     log.error(f"diverged at step {step}: loss={metrics['loss']} -- lower optim_args.alpha_lr")
                     stopped = True
                     break
-                if stop_at is not None and metrics is not None and metrics.get("top1_accuracy", 0.0) >= stop_at:
-                    log.info(f"early stop at step {step}: top1_accuracy={metrics['top1_accuracy']:.4f} >= {stop_at}")
+                reached_accuracy = stop_at is not None and metrics is not None and metrics.get("top1_accuracy", 0.0) >= stop_at
+                reached_loss = stop_at_loss is not None and metrics is not None and metrics.get("loss", math.inf) <= stop_at_loss
+                if reached_accuracy or reached_loss:
+                    log.info(f"early stop at step {step}: top1_accuracy={metrics['top1_accuracy']:.4f}, "
+                             f"loss={metrics['loss']:.4f} (stop_at_accuracy={stop_at}, stop_at_loss={stop_at_loss})")
                     stopped = True
                     evaluate(run, log, step, artifacts_off_schedule=True)  # final weights
                     break

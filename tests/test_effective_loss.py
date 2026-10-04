@@ -103,3 +103,23 @@ def test_runs_on_the_gpu(counts):
     value, gradient = on_gpu.value_and_grad(FULL_ANSATZ)
     assert value == pytest.approx(on_cpu(FULL_ANSATZ).item(), rel=1e-2)        # different draws, same law
     assert all(math.isfinite(g) for g in gradient.values())
+
+
+def test_asymptotic_loss_limits():
+    from icl import asymptotic_loss
+    V, K = 128, 25
+    trigger = K / (V + K)
+    assert asymptotic_loss(V, 10**7, K) == pytest.approx((1 - trigger) * math.log(V), rel=1e-5)   # every trigger solvable
+    assert asymptotic_loss(V, 1e-6, K) == pytest.approx(math.log(V) + trigger * math.log(1 - K / V), rel=1e-5)
+    assert asymptotic_loss(V, 64, K) > asymptotic_loss(V, 1024, K)
+
+
+def test_learning_time_interpolates_the_first_crossing():
+    import pandas as pd
+    from icl import asymptotic_loss, learning_time
+    V, L, K = 128, 256, 25
+    gap = math.log(V) - asymptotic_loss(V, L, K)
+    progress = pd.Series([0.0, 0.1, 0.3, 0.15, 0.9], index=[0, 10, 20, 30, 40])
+    loss = math.log(V) - gap * progress
+    assert learning_time(loss, V, L, K, fraction=0.2) == pytest.approx(15.0)
+    assert math.isnan(learning_time(loss, V, L, K, fraction=0.95))

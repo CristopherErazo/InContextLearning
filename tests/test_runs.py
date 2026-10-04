@@ -67,6 +67,31 @@ def test_matrices_round_trip(tmp_path, backend):
     torch.testing.assert_close(fresh["sequence"], data.batch(5, seed=3)["sequence"])
 
 
+def test_ansatz_init_keeps_the_order_parameters_of_the_draw():
+    from icl import ansatz_matrices, build_model, measure_order_params
+    cfg = make_config("reduced")
+    cfg.model_args.update(init="sample", infinite_d=True)
+    K = cfg.data_args.K
+    torch.manual_seed(4)
+    drawn, _, _ = build_model(cfg.model_args, cfg.optim_args, "cpu")
+    cfg.model_args.ansatz_init = True
+    torch.manual_seed(4)
+    projected, _, message = build_model(cfg.model_args, cfg.optim_args, "cpu", K=K)
+    assert "+ansatz" in message
+    expected = measure_order_params(drawn.matrices(), K)
+    assert measure_order_params(projected.matrices(), K) == pytest.approx(expected, rel=1e-5, abs=1e-7)
+    for name, matrix in ansatz_matrices(expected, cfg.model_args.seq_len, cfg.model_args.vocab_size, K).items():
+        torch.testing.assert_close(projected.matrices()[name].double(), matrix, rtol=1e-5, atol=1e-7)
+    with pytest.raises(ValueError):
+        build_model(cfg.model_args, cfg.optim_args, "cpu")                   # no K
+    cfg.model_args.ansatz_keep_spread = "QG"
+    torch.manual_seed(4)
+    partial, _, _ = build_model(cfg.model_args, cfg.optim_args, "cpu", K=K)
+    torch.testing.assert_close(partial.matrices()["M"], projected.matrices()["M"])
+    for name in "QG":
+        torch.testing.assert_close(partial.matrices()[name], drawn.matrices()[name])
+
+
 def test_from_matrices_rejects_wrong_shapes():
     from icl import ReducedTransformer
     cfg = make_config("full")

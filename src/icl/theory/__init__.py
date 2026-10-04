@@ -14,12 +14,12 @@ from .query_table import (QueryTable, canonical_permutation, check_condition, cl
                           condition_mask, logit_blocks, logit_table, trigger_queries)
 from .ansatz import ORDER_PARAMS, PROFILE, ansatz_logits, ansatz_matrices, measure_order_params, support_sizes
 from .variables import COUNT_LAWS, mean_variables, measure_variables, sample_variables
-from .effective import EffectiveLoss, integrate, trigger_loss
+from .effective import EffectiveLoss, asymptotic_loss, integrate, learning_time, trigger_loss
 
 __all__ = [
     "QueryTable", "canonical_permutation", "cluster_cross_entropy", "logit_blocks", "logit_table",
     "trigger_queries", "check_condition", "condition_mask",
     "ORDER_PARAMS", "PROFILE", "ansatz_logits", "ansatz_matrices", "measure_order_params", "support_sizes",
     "COUNT_LAWS", "mean_variables", "measure_variables", "sample_variables",
-    "EffectiveLoss", "integrate", "trigger_loss",
+    "EffectiveLoss", "asymptotic_loss", "integrate", "learning_time", "trigger_loss",
 ]
