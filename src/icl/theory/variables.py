@@ -11,6 +11,10 @@ paper's names:
            the same three counts (occurrences, sum of nu - 2, pairs with an
            earlier a) for every non-trigger token other than phi(a), as
            (num_rows, V-K-1) columns in the order of the `non_target` block
+    Y_bar  the ordered pairs of occurrences of each non-target token that both
+           follow its trigger, c_tr (c_tr - 1), (num_rows, V-K-1): 0 for the
+           tokens that are no trigger's output (Y_b of the variance note, for the
+           logit noise only)
 
 `measure_variables` and `sample_variables` also return where the occurrences
 are, for a previous-token *profile* ("M_profile" in the order parameters):
@@ -91,10 +95,13 @@ def measure_variables(batch: dict, mus=None, chunk: int = 8192, dtype=torch.floa
         # n_a(nu - 2) at each key: earlier a's at code positions <= j - 2
         earlier_queries_behind = torch.zeros_like(tokens, dtype=dtype)
         earlier_queries_behind[:, 2:] = is_earlier_query.to(dtype).cumsum(1)[:, :-2]
+        follows_trigger = torch.zeros_like(is_key)
+        follows_trigger[:, 1:] = tokens[:, :-1] < K
         weight_per_key = {
             "U": is_key.to(dtype),                                       # occurrences
             "W": is_key * (code_position - 1).to(dtype),                 # nu - 2
             "P": is_key * earlier_queries_behind,                        # pairs with an earlier a
+            "T": (is_key & follows_trigger).to(dtype),                   # occurrences right after a trigger
         }
         permutation = canonical_permutation(query_token, output_sets, K, V)
         # where the occurrences are, for a profile: witness keys (one after each earlier a),
@@ -128,6 +135,7 @@ def measure_variables(batch: dict, mus=None, chunk: int = 8192, dtype=torch.floa
             "U_bar": per_token["U"][:, non_target],
             "W_bar": per_token["W"][:, non_target],
             "P_bar": per_token["P"][:, non_target],
+            "Y_bar": per_token["T"][:, non_target] * (per_token["T"][:, non_target] - 1),
             **keys,
             "K": K,
         }))
@@ -256,9 +264,13 @@ def _sample_chunk(mu, ell, V, K, counts, generator, dtype) -> QueryTable:
     token_positions, is_token = _uniform_positions(occurrences.long(), generator, dtype)
     W_bar = mu_float[:, None] * (token_positions * is_token).sum(-1)
     P_bar = (_earlier_queries_behind(query_positions, token_positions) * is_token).sum(-1)
+    # each occurrence of an output follows its trigger with probability 1/2: Y_bar is the mean of
+    # c_tr (c_tr - 1) given the count, so no draw is added and the other variables keep their stream
+    is_output = torch.arange(V - K - 1, device=mu.device) < K - 1
+    Y_bar = occurrences * (occurrences - 1) / 4 * is_output
 
     return QueryTable({"mu": mu, "ell": ell, "N": ell_float, "F": free_targets, "R": R, "W": W, "P": P,
-                       "U_bar": occurrences, "W_bar": W_bar, "P_bar": P_bar,
+                       "U_bar": occurrences, "W_bar": W_bar, "P_bar": P_bar, "Y_bar": Y_bar,
                        "N_keys": _to_keys(query_positions, is_query, mu),
                        "F_keys": _to_keys(target_positions, is_target, mu),
                        "U_keys": _to_keys(token_positions, is_token, mu), "K": K})
@@ -281,5 +293,6 @@ def mean_variables(mu, ell, V: int, K: int, dtype=torch.float64, device=None) ->
         "U_bar": rates,
         "W_bar": mu_float[:, None] * rates / 2,
         "P_bar": rates * ell_float[:, None] / 2,
+        "Y_bar": (rates / 2) ** 2 * (torch.arange(V - K - 1, device=mu.device) < K - 1),
         "K": K,
     })

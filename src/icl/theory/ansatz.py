@@ -1,7 +1,8 @@
 """The ansatz: which order parameters exist and how they make the logits.
 
 This file and `variables.py` are the only places that know the ansatz
-(paper/scratch/extended_ansatz.tex). To add an order parameter:
+(paper/scratch/extended_ansatz.tex); `noise.py` adds the fluctuation of the
+variance ansatz on top of the brackets of `ansatz_logits`. To add an order parameter:
 
 1. register it in ORDER_PARAMS: the matrix it lives on and its support;
 2. add its terms to `ansatz_logits` (and, if they need a new sequence variable,
@@ -272,20 +273,28 @@ def ansatz_logits(variables: QueryTable, order_params: dict, beta: float, L: int
     M_on U_bar_b, M_on n_keys without a profile (see `_previous_token_sums`).
     """
     dtype, device = variables["N"].dtype, variables["N"].device
-    params = {name: torch.as_tensor(order_params.get(name, 0.0), dtype=dtype, device=device)
-              for name in ORDER_PARAMS}
-    M_off, Q_on, Q_T, G_on, G_T = (params[name] for name in ("M_off", "Q_on", "Q_T", "G_on", "G_T"))
-    delta_Q = Q_on - Q_T
+    G_on, G_T = (torch.as_tensor(order_params.get(name, 0.0), dtype=dtype, device=device) for name in ("G_on", "G_T"))
     prefactor = beta / L
+    brackets = _brackets(variables, order_params, L)
+    h_target = prefactor * G_on * brackets["target"]
+    h_trigger = prefactor * G_T * brackets["trigger"]
+    h_non_target = prefactor * G_on * brackets["non_target"]
+    K = int(variables["K"])
+    return torch.cat([h_trigger[:, None].expand(-1, K), h_non_target, h_target[:, None]], dim=1)
+
+
+def _brackets(variables: QueryTable, order_params: dict, L: int) -> dict[str, torch.Tensor]:
+    """The brackets of `ansatz_logits`, h = beta/L Gamma B (eq. Bc of the variance note):
+    "target" B_phi and "trigger" B_T (num_rows,), "non_target" B_b (num_rows, V-K-1)."""
+    dtype, device = variables["N"].dtype, variables["N"].device
+    M_off, Q_on, Q_T = (torch.as_tensor(order_params.get(name, 0.0), dtype=dtype, device=device)
+                        for name in ("M_off", "Q_on", "Q_T"))
+    delta_Q = Q_on - Q_T
     n_keys = (variables["mu"] - 2).clamp(min=0).to(dtype)
     sum_keys = n_keys * (n_keys - 1) / 2
     on = _previous_token_sums(variables, order_params, L, dtype, device)
-
     R, W, P = (variables[name] for name in ("R", "W", "P"))
-    h_target = prefactor * G_on * (Q_on * on["witness"] + Q_T * on["free"] + M_off * Q_T * W + M_off * delta_Q * P)
-    h_trigger = prefactor * G_T * (Q_T * on["all"] + M_off * Q_T * sum_keys
-                                   + delta_Q * on["witness"] + M_off * delta_Q * R)
-    h_non_target = prefactor * G_on * (Q_T * on["tokens"] + M_off * Q_T * variables["W_bar"]
-                                       + M_off * delta_Q * variables["P_bar"])
-    K = int(variables["K"])
-    return torch.cat([h_trigger[:, None].expand(-1, K), h_non_target, h_target[:, None]], dim=1)
+    return {"target": Q_on * on["witness"] + Q_T * on["free"] + M_off * Q_T * W + M_off * delta_Q * P,
+            "trigger": Q_T * on["all"] + M_off * Q_T * sum_keys + delta_Q * on["witness"] + M_off * delta_Q * R,
+            "non_target": (Q_T * on["tokens"] + M_off * Q_T * variables["W_bar"]
+                           + M_off * delta_Q * variables["P_bar"])}

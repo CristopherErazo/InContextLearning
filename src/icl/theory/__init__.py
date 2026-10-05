@@ -5,10 +5,12 @@
   cross-entropy. Ansatz-independent.
 - `ansatz`: the order-parameter and block-variance registries, the levels, and the ansatz logits.
 - `variables`: the sequence variables the ansatz logits depend on.
+- `noise`: the fluctuation of the logits in the variance ansatz (variances, sampled
+  logits, the non-trigger loss).
 - `effective`: the effective population loss, differentiable in the order parameters,
   and its gradient flow (`integrate`).
 
-Only `ansatz` and `variables` know the ansatz; see `ansatz` for how to extend it.
+Only `ansatz`, `variables` and `noise` know the ansatz; see `ansatz` for how to extend it.
 """
 from .query_table import (QueryTable, canonical_permutation, check_condition, cluster_cross_entropy,
                           condition_mask, logit_blocks, logit_table, trigger_queries)
@@ -16,7 +18,9 @@ from .ansatz import (DIAGNOSTIC_MEANS, LEVELS, ORDER_PARAMS, POOLED_VARIANCES, P
                      ansatz_matrices, at_level, block_variance, measure_diagnostic_means, measure_order_params,
                      measure_variances, support_sizes, variance_sizes)
 from .variables import COUNT_LAWS, mean_variables, measure_variables, sample_variables
-from .effective import EffectiveLoss, asymptotic_loss, integrate, learning_time, trigger_loss
+from .noise import noise_variances, non_trigger_loss, sample_logits
+from .effective import (EffectiveLoss, asymptotic_loss, closure_cross_entropy, exact_rates, integrate, learning_time,
+                        trigger_loss)
 
 __all__ = [
     "QueryTable", "canonical_permutation", "cluster_cross_entropy", "logit_blocks", "logit_table",
@@ -25,5 +29,7 @@ __all__ = [
     "DIAGNOSTIC_MEANS", "VARIANCES", "POOLED_VARIANCES", "SIGNAL", "LEVELS", "at_level", "block_variance",
     "measure_diagnostic_means", "measure_variances", "variance_sizes",
     "COUNT_LAWS", "mean_variables", "measure_variables", "sample_variables",
-    "EffectiveLoss", "asymptotic_loss", "integrate", "learning_time", "trigger_loss",
+    "noise_variances", "non_trigger_loss", "sample_logits",
+    "EffectiveLoss", "asymptotic_loss", "closure_cross_entropy", "exact_rates", "integrate", "learning_time",
+    "trigger_loss",
 ]

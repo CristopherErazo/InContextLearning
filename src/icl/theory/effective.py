@@ -17,9 +17,25 @@ The expectation in CE is taken one of two ways:
                  per (mu, ell), drawn once in the constructor and reused, so the
                  loss is a smooth deterministic function of the order parameters.
 
-`integrate` runs the gradient flow of such a loss in the order parameters,
-with the rates (the Jacobian of the projection, the step size, ...) given by
-the caller.
+With block variances in the order parameters (the variance ansatz, `noise.py`)
+the logits are h + xi, xi Gaussian given the sequence, and the expectation is
+also over xi: the non-trigger part becomes the mean over mu of
+`non_trigger_loss` (log V + half the spread of the logit vector), and in CE
+
+- method="mc":   each sampled row adds one draw of xi (`sample_logits`), with
+                 normals drawn once in the constructor;
+- method="mean": the Gaussian closure at the mean logits (eq. CE_closure without
+                 the process part): the K individual trigger parts and the
+                 non-targets by e^{V/2}, the target and the common trigger part
+                 by quadrature, with the variances averaged over
+                 `noise_samples` draws of the variables per (mu, ell) (they are not
+                 linear in the variables), drawn on first use.
+
+Without any variance key both methods are exactly the signal-only loss.
+
+`integrate` runs the gradient flow of such a loss in the order parameters
+(the variances multiplicatively), with the rates given by the caller;
+`exact_rates` gives those of the d = inf SGD dynamics of a run.
 """
 from __future__ import annotations
 
@@ -32,11 +48,21 @@ import torch
 from scipy.integrate import solve_ivp
 from scipy.stats import poisson
 
-from .ansatz import ORDER_PARAMS, PROFILE, ansatz_logits
-from .query_table import QueryTable, cluster_cross_entropy, condition_mask
+from .ansatz import ORDER_PARAMS, POOLED_VARIANCES, PROFILE, VARIANCES, ansatz_logits, support_sizes, variance_sizes
+from .noise import _target_and_common, noise_variances, non_trigger_loss, sample_logits
+from .query_table import QueryTable, cluster_cross_entropy, condition_mask, logit_blocks
 from .variables import COUNT_LAWS, mean_variables, sample_variables
 
 METHODS = ("mean", "mc")
+VARIANCE_KEYS = (*VARIANCES, *POOLED_VARIANCES)
+# the closure's (target, common trigger) integral: trapezoid rule on a grid of standard normals in [-8, 8]^2, which
+# converges exponentially for these softplus-like integrands (Gauss-Hermite does not once the noise is large: 16 nodes
+# were off by 1e-2 at moderate spreads, this grid by 1e-7, and by 3e-4 with standard deviations of 40)
+QUADRATURE_SPACING, QUADRATURE_RANGE = 0.2, 8.0
+
+
+def _has_noise(order_params: dict) -> bool:
+    return any(name in order_params for name in VARIANCE_KEYS)
 
 
 class EffectiveLoss:
@@ -48,22 +74,27 @@ class EffectiveLoss:
         loss.value_and_grad(order_params)        # (float, {name: d loss / d name})
         loss.breakdown(order_params)             # loss per part and per (mu, ell) cluster
 
-    `order_params` is {name: float or 0-d tensor} over the names of ORDER_PARAMS;
+    `order_params` is {name: float or 0-d tensor} over the names of ORDER_PARAMS,
+    plus optionally "M_profile" and the block variances (VARIANCES, POOLED_VARIANCES);
     a missing one counts as 0. ell is truncated where the Poisson tail falls
     below `ell_tol` (the kept probabilities are renormalised). For method="mc"
     the cached variables take about (number of clusters) x num_samples x V
-    numbers: thin out `mus` for long sequences.
+    numbers: thin out `mus` for long sequences. method="mean" with variances
+    averages them over `noise_samples` draws per cluster (16 already give the
+    loss to 1e-7 and its gradient to 0.3%); each call then costs about as much
+    as method="mc" with that many samples.
     """
 
     def __init__(self, V: int, L: int, K: int, beta: float, method: str = "mean", mus=None,
                  num_samples: int = 256, counts: str = "multinomial", ell_tol: float = 1e-6,
-                 seed: int = 0, dtype=torch.float64, device=None):
+                 seed: int = 0, dtype=torch.float64, device=None, noise_samples: int = 32):
         if method not in METHODS:
             raise ValueError(f"method must be one of {METHODS}, got {method!r}")
         if counts not in COUNT_LAWS:
             raise ValueError(f"counts must be one of {COUNT_LAWS}, got {counts!r}")
         self.V, self.L, self.K, self.beta, self.method = V, L, K, beta, method
         self.dtype, self.device = dtype, device
+        self.num_samples, self.noise_samples, self.counts, self.seed = num_samples, noise_samples, counts, seed
         self.trigger_probability = K / (V + K)
         mus = torch.arange(1, L + 1) if mus is None else torch.as_tensor(list(mus)).reshape(-1)
         if (mus < 1).any() or (mus > L).any():
@@ -83,15 +114,22 @@ class EffectiveLoss:
         self.clusters = QueryTable({"mu": torch.cat(cluster_mu), "ell": torch.cat(cluster_ell),
                                     "probability": torch.cat(probability).to(dtype)})
 
+        self._samples = None
         if method == "mean":
             self.variables = mean_variables(self.clusters["mu"], self.clusters["ell"], V, K,
                                             dtype=dtype, device=device)
         else:
             generator = torch.Generator(device or "cpu").manual_seed(seed)
-            self.variables = sample_variables(self.clusters["mu"].repeat_interleave(num_samples),
-                                              self.clusters["ell"].repeat_interleave(num_samples),
-                                              V, K, counts=counts, generator=generator, dtype=dtype,
-                                              device=device)
+            self.variables = self._sample(num_samples, generator)
+            # one draw of the logit noise per row (the canonical layout, then the common trigger part)
+            self.normals = torch.randn(self.variables.num_rows, V + 1, generator=generator, dtype=dtype,
+                                       device=device)
+
+    def _sample(self, num_samples: int, generator) -> QueryTable:
+        """`num_samples` draws of the variables per cluster, cluster after cluster."""
+        return sample_variables(self.clusters["mu"].repeat_interleave(num_samples),
+                                self.clusters["ell"].repeat_interleave(num_samples), self.V, self.K,
+                                counts=self.counts, generator=generator, dtype=self.dtype, device=self.device)
 
     @classmethod
     def from_config(cls, config, **options) -> "EffectiveLoss":
@@ -103,23 +141,49 @@ class EffectiveLoss:
 
     def cluster_cross_entropy(self, order_params: dict) -> torch.Tensor:
         """(number of clusters,) CE(mu, ell), in the order of `self.clusters`."""
-        logits = ansatz_logits(self.variables, order_params, self.beta, self.L)
+        if not _has_noise(order_params):
+            logits = ansatz_logits(self.variables, order_params, self.beta, self.L)
+        elif self.method == "mc":
+            logits = sample_logits(self.variables, order_params, self.beta, self.L, normals=self.normals)
+        else:
+            return self._closure_cross_entropy(order_params)
         table = QueryTable({"logits": logits, "mu": self.variables["mu"], "ell": self.variables["ell"]})
         return cluster_cross_entropy(table)["cross_entropy"]
+
+    def _closure_cross_entropy(self, order_params: dict) -> torch.Tensor:
+        """method="mean" with variances: the closure at the mean logits, with the noise
+        variances averaged over the sampled variables of each cluster."""
+        if self._samples is None:
+            generator = torch.Generator(self.device or "cpu").manual_seed(self.seed)
+            self._samples = self._sample(self.noise_samples, generator)
+        variances = noise_variances(self._samples, order_params, self.beta, self.L)
+        num_clusters = self.clusters.num_rows
+        variances = {name: value.reshape(num_clusters, self.noise_samples, *value.shape[1:]).mean(1)
+                     for name, value in variances.items()}
+        return closure_cross_entropy(ansatz_logits(self.variables, order_params, self.beta, self.L), variances,
+                                     self.K)
+
+    def non_trigger_loss(self, order_params: dict):
+        """The cross-entropy at the non-trigger queries, averaged over `mus`: log V
+        without variances, else the mean of `noise.non_trigger_loss` (a tensor)."""
+        if not _has_noise(order_params):
+            return math.log(self.V)
+        return non_trigger_loss(self.mus, order_params, self.beta, self.L, self.V, self.K, dtype=self.dtype,
+                                device=self.variables["N"].device).mean()
 
     def __call__(self, order_params: dict) -> torch.Tensor:
         trigger_loss = (self.clusters["probability"].to(self.variables["N"].device)
                         * self.cluster_cross_entropy(order_params)).sum() / len(self.mus)
         q = self.trigger_probability
-        return (1 - q) * math.log(self.V) + q * trigger_loss
+        return (1 - q) * self.non_trigger_loss(order_params) + q * trigger_loss
 
     def value_and_grad(self, order_params: dict) -> tuple[float, dict]:
         """The loss and its gradient with respect to every registered order
-        parameter (missing ones are evaluated at 0), and with respect to the
-        profile if "M_profile" is given (a tensor; M_on then does not enter the
-        logits and its gradient is 0)."""
+        parameter (missing ones are evaluated at 0), to the variances that are
+        given, and to the profile if "M_profile" is given (a tensor; M_on then
+        does not enter the logits and its gradient is 0)."""
         params = {name: torch.tensor(float(order_params.get(name, 0.0)), dtype=self.dtype, requires_grad=True)
-                  for name in ORDER_PARAMS}
+                  for name in (*ORDER_PARAMS, *(name for name in VARIANCE_KEYS if name in order_params))}
         if PROFILE in order_params:
             params[PROFILE] = torch.as_tensor(order_params[PROFILE], dtype=self.dtype).detach().clone().requires_grad_(True)
         value = self(params)
@@ -138,7 +202,34 @@ class EffectiveLoss:
             clusters = QueryTable(dict(self.clusters))
             clusters["cross_entropy"] = self.cluster_cross_entropy(order_params).cpu()
             return {"loss": self(order_params).item(), "loss_trigg": trigger_loss(clusters),
-                    "loss_non_trigg": math.log(self.V), "clusters": clusters}
+                    "loss_non_trigg": float(self.non_trigger_loss(order_params)), "clusters": clusters}
+
+
+def closure_cross_entropy(logits: torch.Tensor, variances: dict, K: int) -> torch.Tensor:
+    """(rows,) the cross-entropy of Gaussian logits with means `logits` (rows, V, the
+    canonical layout) and the variances of `noise_variances` (one per row), in the
+    closure of eq. CE_closure: the K triggers share the common part xi_c and sum their
+    individual parts by the law of large numbers, K e^{h_T + xi_c + V_i/2}; the
+    non-targets likewise, sum_b e^{h_b + V_b/2}; the target and xi_c, jointly Gaussian,
+    by the trapezoid rule on a grid of standard normals (QUADRATURE_SPACING,
+    QUADRATURE_RANGE). With no variance this is logsumexp(logits) - logits[target]."""
+    blocks = logit_blocks(K, logits.size(1))
+    nodes = torch.arange(-QUADRATURE_RANGE, QUADRATURE_RANGE + QUADRATURE_SPACING / 2, QUADRATURE_SPACING,
+                         dtype=logits.dtype, device=logits.device)
+    weights = torch.exp(-nodes ** 2 / 2)
+    weights = weights / weights.sum()                                               # the standard normal's
+    target_normal, common_normal = (grid.reshape(-1) for grid in torch.meshgrid(nodes, nodes, indexing="ij"))
+    weight = torch.outer(weights, weights).reshape(-1)
+    xi_target, xi_common = _target_and_common(*(variances[name][:, None] for name in
+                                                ("target", "trigger_common", "target_trigger")),
+                                              target_normal, common_normal)       # (rows, nodes)
+    target = logits[:, blocks["target"]] + xi_target
+    trigger_mean = logits[:, :1]                                                   # the same for the K triggers
+    triggers = math.log(K) + trigger_mean + variances["trigger_individual"].clamp(min=0)[:, None] / 2 + xi_common
+    non_targets = torch.logsumexp(logits[:, blocks["non_target"]] + variances["non_target"].clamp(min=0) / 2, dim=1,
+                                  keepdim=True)
+    terms = torch.stack(torch.broadcast_tensors(target, triggers, non_targets), dim=-1)
+    return ((torch.logsumexp(terms, dim=-1) - target) * weight).sum(1)
 
 
 def trigger_loss(clusters: QueryTable, ell=None) -> float:
@@ -181,6 +272,39 @@ def learning_time(loss: pd.Series, V: int, L: int, K: int, fraction: float = 0.2
     return steps[first - 1] + (fraction - before) / (after - before) * (steps[first] - steps[first - 1])
 
 
+def exact_rates(config, names) -> dict:
+    """The `integrate` rates that make it the d = inf SGD dynamics of the ansatz (eqs.
+    flow_mean, flow of the variance note), for a run's TrainerArgs (`RunData.config`).
+    Every entry moves as d X_ij / d step = -eta_0 kappa_X d loss / d X_ij, with
+    eta_0 = alpha_lr (the step of ReducedSGD), kappa_M = kappa_Gamma = 1 and
+    kappa_Q = sigma_0^2 (the Gram matrix of the frozen WOV1), so the rate of
+
+        a mean              eta_0 kappa_X / n      (n its support size)
+        "M_profile"         eta_0                  (every entry; or one profile_family rate)
+        a block variance    4 eta_0 kappa_X / n    (`integrate` multiplies it by the variance)
+        a pooled variance   4 eta_0 kappa_X / n_X  (n_X the entries of all blocks of the matrix)
+
+    At finite d the Gram matrices fluctuate around these values. Plain SGD only:
+    momentum would rescale time."""
+    if config.optim_args.momentum:
+        raise ValueError("exact_rates is for plain SGD, and the run used momentum")
+    L, V, K = config.model_args.seq_len, config.model_args.vocab_size, config.data_args.K
+    eta_0 = config.optim_args.alpha_lr
+    kappa = {"M": 1.0, "Q": config.model_args.sigma_0 ** 2, "G": 1.0}
+    sizes = {**support_sizes(L, V, K), **variance_sizes(L, V, K)}
+    matrix_of = {**{name: matrix for name, (matrix, _) in (*ORDER_PARAMS.items(), *VARIANCES.items())},
+                 **POOLED_VARIANCES}
+    rates = {}
+    for name in names:
+        if name == PROFILE:
+            rates[name] = eta_0 * kappa["M"]
+        elif name in matrix_of:
+            rates[name] = (4 if name in VARIANCE_KEYS else 1) * eta_0 * kappa[matrix_of[name]] / sizes[name]
+        else:
+            raise ValueError(f"no rate for {name!r}: not a registered order parameter, profile or variance")
+    return rates
+
+
 def integrate(loss, initial_order_params: dict, rates: dict, steps: float, record_steps=None,
               method: str = "LSODA", rtol: float = 1e-6, atol: float = 1e-9, profile_family=None,
               **solver_options) -> pd.DataFrame:
@@ -194,7 +318,14 @@ def integrate(loss, initial_order_params: dict, rates: dict, steps: float, recor
     (or absent) in `initial_order_params`.
 
     loss: any callable {name: 0-d tensor} -> 0-d tensor, e.g. an EffectiveLoss.
-    rates: {name: rate per SGD step}, derived by the caller.
+    rates: {name: rate per SGD step}, derived by the caller (`exact_rates` for a run).
+
+    The block variances (VARIANCES, POOLED_VARIANCES) flow multiplicatively,
+
+        d var / d step = - rates[var] * var * d loss / d var,
+
+    so a variance at 0 stays 0; one in `initial_order_params` but not in `rates` is
+    passed to the loss unchanged. Each variance given is a column of the result.
 
     The profile can move too: put "M_profile" (a tensor of length L-1) in
     `initial_order_params` and in `rates`, with one rate for every entry or a
@@ -226,10 +357,11 @@ def integrate(loss, initial_order_params: dict, rates: dict, steps: float, recor
     """
     if not rates:
         raise ValueError("rates is empty: name at least one order parameter to move")
-    unknown = set(rates) - set(ORDER_PARAMS) - {PROFILE}
+    unknown = set(rates) - set(ORDER_PARAMS) - {PROFILE} - set(VARIANCE_KEYS)
     if unknown:
         raise ValueError(f"rates for unregistered order parameters: {sorted(unknown)}")
-    names = list(ORDER_PARAMS) + ([PROFILE] if PROFILE in initial_order_params or PROFILE in rates else [])
+    names = (list(ORDER_PARAMS) + ([PROFILE] if PROFILE in initial_order_params or PROFILE in rates else [])
+             + [name for name in VARIANCE_KEYS if name in initial_order_params or name in rates])
     profile_function = None
     if profile_family is not None:
         profile_function, theta0 = profile_family
@@ -251,6 +383,7 @@ def integrate(loss, initial_order_params: dict, rates: dict, steps: float, recor
     sizes = [initial(name).size for name in moving]
     rate_vector = np.concatenate([np.broadcast_to(np.asarray(rates[name], dtype=float).reshape(-1), (size,))
                                   for name, size in zip(moving, sizes)])
+    is_variance = np.concatenate([np.full(size, name in VARIANCE_KEYS) for name, size in zip(moving, sizes)])
 
     def order_params_from(values) -> dict:
         params = dict(fixed)
@@ -271,7 +404,7 @@ def integrate(loss, initial_order_params: dict, rates: dict, steps: float, recor
         if profile_function is not None:                # project the entry-wise flow on the family
             jacobian = torch.autograd.functional.jacobian(profile_function, flat.detach()[theta_slice])
             gradient[theta_slice] = torch.linalg.solve(jacobian.T @ jacobian, gradient[theta_slice])
-        return -rate_vector * gradient.numpy()
+        return -rate_vector * gradient.numpy() * np.where(is_variance, values, 1.0)
 
     record_steps = np.linspace(0, steps, 201) if record_steps is None else np.asarray(record_steps, dtype=float)
     start = np.concatenate([initial(name) for name in moving])

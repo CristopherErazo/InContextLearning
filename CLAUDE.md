@@ -217,6 +217,27 @@ triggers (by trigger), `[2K-1,V-1)` the rest (by id), `V-1` the target.
   `mean_variables(mu, ell, V, K)` (Table 2 means, so `ansatz_logits` of it is the mean
   logit vector). `tests/test_sampler.py` checks every Table 2 mean / variance and the
   listed covariances (Poisson counts reproduce them exactly) and the multinomial budget.
+  One more column, for the logit noise only: `Y_bar` (n, V-K-1), the ordered pairs
+  c_tr (c_tr - 1) of occurrences of each output that follow its trigger (0 for the plain
+  tokens); sampled it is its mean given the count, c (c - 1) / 4, so no draw is added and
+  the other columns keep their random stream.
+- `noise.py` (the variance ansatz, sections Logits / Effective loss of the variance note):
+  the logits are `ansatz_logits` + xi, xi Gaussian given the sequence.
+  `noise_variances(vars, op, beta, L)` gives per trigger query (measured or sampled
+  variables: it needs the key columns) `target` V_on, `trigger_common` V_c^T (shared by
+  the K triggers), `trigger_individual` V_i^T, `non_target` V_b (n, V-K-1) and
+  `target_trigger` C^{on,T}, from the brackets of `ansatz_logits` (`ansatz._brackets`) and
+  the exact discrete key sums D, G1, K1, K2, J2 of the mean M (profile included);
+  differentiable in everything. Their mean given (mu, ell) is the average over
+  `sample_variables` rows (not `mean_variables`: they are not linear in the variables).
+  `sample_logits(vars, op, beta, L, generator, normals=None)` adds a Gaussian draw
+  (target and common trigger part jointly, the rest independent); fixed `normals` (n,
+  V+1: the canonical layout, then the common part) are common random numbers.
+  `non_trigger_loss(mu, op, beta, L, V, K)` is L_N(mu) to second order (eq. LN). Without
+  variances all three reduce exactly to no noise / `ansatz_logits` / log V. Deviation from
+  the note: C^{on,T} subtracts var_Q_T sum_witness m_nu (w_{nu-1} + kappa_2 K_1), the
+  background counted for the a-source of each witness key (the note's version is 7-11%
+  high at ell >= 1 against the exact covariance).
 - `effective.py`: `EffectiveLoss(V, L, K, beta, method="mean" | "mc", mus, num_samples,
   counts="multinomial", ell_tol, seed, device)` (or `.from_config(run.config, ...)`), the
   population loss `(1 - q_T) log V + q_T mean_mu sum_ell Poisson(ell; p_T mu) CE(mu, ell)`
@@ -230,13 +251,42 @@ triggers (by trigger), `[2K-1,V-1)` the rest (by id), `V-1` the target.
   0.5%, ell >= 1 to 3%), `gradcheck`, and the GPU path. Selection conditions (`None`, k,
   `[k, ...]`, `">=k"`) are one helper, `condition_mask` in `query_table.py`, shared by
   `QueryTable.select`, `trigger_loss` and `LossMetric`.
+  With variance keys in `op` (block or pooled; any present switches the noise on, so
+  without them both methods are bit-identical to the signal-only loss) the expectation is
+  also over the logit noise of `noise.py`: the non-trigger part is the mean over `mus` of
+  `non_trigger_loss` (`loss.non_trigger_loss(op)`, in `breakdown` as `loss_non_trigg`);
+  "mc" adds one draw of the noise per sampled row (`sample_logits` with normals frozen in
+  the constructor); "mean" keeps the mean logits and applies the Gaussian closure
+  `closure_cross_entropy(logits, variances, K)` (K e^{h_T + xi_c + V_i/2} for the
+  triggers, sum_b e^{h_b + V_b/2} for the non-targets, the (target, common trigger) pair by
+  a trapezoid grid of standard normals, `QUADRATURE_SPACING` 0.2 on [-8, 8]; Gauss-Hermite
+  is badly off once the noise is large), with the variances averaged over `noise_samples`
+  (default 32) draws of the variables per cluster, drawn on first use. `value_and_grad`
+  also returns the gradient of every variance key given. Cost with variances (V=128,
+  L=256, 64 mus): "mean" 0.34 s per `value_and_grad` on the CPU, 0.07 s on the GPU.
+  `tests/test_effective_noise.py`: no variance = signal only, the noise raises the loss,
+  "mean" and "mc" agree on its cost (5%), the closure against a direct Monte Carlo of
+  its integral, `gradcheck` in means and variances, the non-trigger part against the
+  model on `noise=` draws. Against the model the trigger part needs ~100 networks (one
+  network's trigger loss scatters by ~0.1 nats: its K query rows of Q are quenched); over
+  128 the noise cost agreed to 5% (total 0.0465 +- 0.0010 vs 0.0485-0.049, trigger part
+  0.122 +- 0.007 vs 0.131-0.134).
   `integrate(loss, initial_order_params, rates, steps, record_steps, method="LSODA")`
   runs `d theta_i/d step = -rates[i] d loss/d theta_i` with `scipy.integrate.solve_ivp`
   (time in SGD steps; the rates are the caller's, e.g. derived from the projection of
   ReducedSGD); parameters absent from `rates` stay frozen at their initial value (0 if
   absent there too); gradients by autograd, so any callable `{name: tensor} -> tensor`
   works. Returns a DataFrame indexed by `step` with the metric names + `loss`, ready to
-  overlay on `RunData.metrics`. All parameters at 0 is a fixed point.
+  overlay on `RunData.metrics`. All parameters at 0 is a fixed point. Variance keys flow
+  multiplicatively, `d var/d step = -rates[var] var d loss/d var` (0 stays 0; one without
+  a rate is passed to the loss as given; each given variance is a column).
+  `exact_rates(config, names)` gives the rates of the d = inf SGD dynamics of a run
+  (`RunData.config`): eta_0 = alpha_lr (ReducedSGD's step), kappa_M = kappa_Gamma = 1,
+  kappa_Q = sigma_0^2 (k_R of the frozen WOV1); a mean eta_0 kappa_X / n (support size),
+  `M_profile` eta_0 per entry, a variance 4 eta_0 kappa_X / n (pooled: n = all entries of
+  the matrix's blocks); plain SGD only. `tests/test_flow.py` also checks the closed-form
+  variance flow and that one ReducedSGD step at d = inf moves every block mean by exactly
+  `-exact_rates x` its batch gradient.
   `asymptotic_loss(V, L, K)` is the manuscript's L^infty and `learning_time(loss, V, L, K,
   fraction=0.2)` the first step (interpolated) at which a loss series has gone `fraction`
   of the way from log V to it: the learning time used for runs, controls and flows alike
@@ -262,13 +312,17 @@ triggers (by trigger), `[2K-1,V-1)` the rest (by id), `V-1` the target.
   `tests/test_profile.py`: exactness with a random profile, constant profile == scalar,
   keys vs counts, sampled witness sums vs (ell mean, ell var) of the profile, gradcheck,
   flow.
-Only `ansatz.py` and `variables.py` know the ansatz; extending it = register the
+Only `ansatz.py`, `variables.py` and `noise.py` know the ansatz; extending it = register the
 parameter + add its terms (and variables). `tests/test_theory.py` runs the model on
 `ansatz_matrices(op)` and requires `ansatz_logits(measure_variables(...))` to match to
 1e-12 at every trigger query: keep it passing when the ansatz changes.
 `tests/test_variances.py` checks the block-variance estimators on `noise=` draws with
 known variances (the sub-diagonal around a smooth profile included), the pooled
-variances, `at_level` and the order-parameter probes.
+variances, `at_level` and the order-parameter probes. `tests/test_noise.py` checks the
+noise formulas against the exact covariance given the sequence (eq. cov_exact, computed
+per row; within 3%, the covariance 4%, the non-trigger loss 2%, at a mid-training and a
+trained-like point), that exact covariance against the model on `noise=` draws, no
+variance = no noise, the initialisation floor V_0 and the `sample_logits` covariance.
 
 **Training helpers (`src/icl/training.py`).** `build_model(model_args, optim_args,
 device)` returns `(model, optimizer, log_line)` for either backend (the full path is
@@ -352,7 +406,9 @@ batch size, which needs less memory than a training step) to the `Evaluator`.
 `extra_args.stop_at_loss` stops on the loss like `stop_at_accuracy` does on the
 accuracy. `scripts/L_sweep_controls.py` (ansatz-init reruns of the d = inf `L_sweep_reduced`
 runs) and `scripts/L_sweep_flows.py` (effective flows of the signal / trigger / extended
-variants, to `data/effective_L_sweep/`) feed `notebooks/26-10-04_L_sweep_effective.ipynb`.
+variants, to `data/effective_L_sweep/`, rates from `exact_rates`; the sigma_0 = 0.5 flows
+written before 2026-10-05 had Q rates 4x too large) feed
+`notebooks/26-10-04_L_sweep_effective.ipynb`.
 `track_results` records `train_time` and `eval_time` separately, `ms_per_step` of
 training alone, and `peak_gpu_mem_gib`.
 

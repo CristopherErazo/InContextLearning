@@ -8,9 +8,12 @@ for three nested variants of the ansatz:
     trigger   + Q_T, G_T
     extended  + M_off
 
-with the rates alpha_lr / (support size), exact at d = inf on the ansatz. Its
-learning time is `learning_time(flow["loss"], ...)`: the step at which the loss
-has gone FRACTION of the way from log V to the manuscript's L^infty.
+with the rates `exact_rates(config, ...)`, exact at d = inf on the ansatz:
+alpha_lr sigma_0^2 / (support size) for Q, alpha_lr / (support size) for M and
+Gamma. (Before 2026-10-05 the Q rates lacked the sigma_0^2, so the sigma_0 = 0.5
+flows written then are wrong; the sigma_0 = 1 ones are unchanged.) Its learning
+time is `learning_time(flow["loss"], ...)`: the step at which the loss has gone
+FRACTION of the way from log V to the manuscript's L^infty.
 
     uv run python -u scripts/L_sweep_flows.py [run_011 run_026 ...]
     uv run python -u scripts/L_sweep_flows.py --source L_sweep_reduced_sigma0.5_loss_stop
@@ -29,8 +32,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from omegaconf import OmegaConf
 
-from icl import EffectiveLoss, RunData, integrate, learning_time, measure_order_params, support_sizes
+from icl import EffectiveLoss, RunData, exact_rates, integrate, learning_time, measure_order_params
 
 CODE = Path(__file__).resolve().parents[1]
 VARIANTS = {"signal": ("M_on", "Q_on", "G_on"),
@@ -60,15 +64,14 @@ def main(names, source):
         if not config["model_args"]["infinite_d"] or (names and run_dir.name not in names):
             continue
         V, L, K = config["model_args"]["vocab_size"], config["model_args"]["seq_len"], config["data_args"]["K"]
-        beta, alpha_lr = config["model_args"]["beta"], config["optim_args"]["alpha_lr"]
+        beta = config["model_args"]["beta"]
         start = initial_order_params(run_dir, K)
-        sizes = support_sizes(L, V, K)
         mus = np.unique(np.linspace(1, L, NUM_MUS).round().astype(int))
         loss = EffectiveLoss(V, L, K, beta, method="mean", mus=mus)
         for variant, moving in VARIANTS.items():
             clock = time.perf_counter()
-            flow = integrate(loss, {name: start[name] for name in moving},
-                             {name: alpha_lr / sizes[name] for name in moving},
+            rates = exact_rates(OmegaConf.create(config), moving)
+            flow = integrate(loss, {name: start[name] for name in moving}, rates,
                              steps=MAX_STEPS, record_steps=np.arange(0, MAX_STEPS + 1, RECORD_EVERY))
             flows[(run_dir.name, variant)] = flow
             T = learning_time(flow["loss"], V, L, K, FRACTION)
