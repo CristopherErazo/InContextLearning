@@ -8,7 +8,9 @@ from typing import Literal
 
 import torch
 
-from ..theory import check_condition, condition_mask, measure_order_params
+from ..theory import (DIAGNOSTIC_MEANS, ORDER_PARAMS, POOLED_VARIANCES, VARIANCES, check_condition, condition_mask,
+                      measure_diagnostic_means, measure_order_params, measure_variances)
+from .artifacts import MProfile
 from .evaluator import EvalContext
 
 Positions = Literal["all", "trigg", "non_trigg"]
@@ -86,11 +88,67 @@ class TargetProbMass:
         return _mean_or_nan(probs.gather(1, ctx.trigger_target[in_context][:, None]))
 
 
+MEAN_NAMES = (*ORDER_PARAMS, *DIAGNOSTIC_MEANS)
+VARIANCE_NAMES = (*VARIANCES, *POOLED_VARIANCES, "var_M_on_raw")
+
+
+def _checked(names, allowed) -> list[str]:
+    names = list(allowed if names is None else dict.fromkeys(names))
+    unknown = set(names) - set(allowed)
+    if unknown:
+        raise ValueError(f"unknown names {sorted(unknown)}; allowed: {list(allowed)}")
+    return names
+
+
 class OrderParameters:
-    """Every order parameter registered in `icl.theory.ansatz.ORDER_PARAMS`,
-    measured from `ctx.matrices` (the mean of each over its support)."""
+    """The block means measured from `ctx.matrices` (the mean of each over its
+    support): by default every order parameter of `icl.theory.ORDER_PARAMS`;
+    `names` may also pick the diagnostic means of `DIAGNOSTIC_MEANS` (Q_N, G_N,
+    zero in the ansatz)."""
 
     name = "order_parameters"
 
+    def __init__(self, names=None):
+        self.names = _checked(list(ORDER_PARAMS) if names is None else names, MEAN_NAMES)
+
     def __call__(self, ctx: EvalContext) -> dict[str, float]:
-        return measure_order_params(ctx.matrices, ctx.K)
+        means = measure_order_params(ctx.matrices, ctx.K)
+        if any(name in DIAGNOSTIC_MEANS for name in self.names):
+            means.update(measure_diagnostic_means(ctx.matrices, ctx.K))
+        return {name: means[name] for name in self.names}
+
+
+class BlockVariances:
+    """The block variances of `icl.theory.measure_variances`, measured from
+    `ctx.matrices`: the eight of VARIANCES, the pooled ones of POOLED_VARIANCES and
+    "var_M_on_raw" (all by default, or only `names`)."""
+
+    name = "block_variances"
+
+    def __init__(self, names=None):
+        self.names = _checked(names, VARIANCE_NAMES)
+
+    def __call__(self, ctx: EvalContext) -> dict[str, float]:
+        variances = measure_variances(ctx.matrices, ctx.K)
+        return {name: variances[name] for name in self.names}
+
+
+ORDER_PARAMETER_GROUPS = {"means": MEAN_NAMES, "variances": VARIANCE_NAMES, "profile": ("profile",)}
+
+
+def order_parameter_probes(names) -> tuple[list, list]:
+    """(scalar probes, artifact probes) for a list such as `extra_args.log_order_params`:
+    the groups "means" (OrderParameters of the six order parameters and Q_N, G_N),
+    "variances" (BlockVariances of every block variance) and "profile" (MProfile, the
+    sub-diagonal of M, saved at every scalar evaluation), and/or individual metric
+    names. An empty list gives no probe."""
+    chosen = []
+    for name in names:
+        if name not in ORDER_PARAMETER_GROUPS and name not in (*MEAN_NAMES, *VARIANCE_NAMES):
+            raise ValueError(f"unknown order-parameter log {name!r}: use a group of "
+                             f"{list(ORDER_PARAMETER_GROUPS)} or a name of {[*MEAN_NAMES, *VARIANCE_NAMES]}")
+        chosen.extend(ORDER_PARAMETER_GROUPS.get(name, (name,)))
+    means = [name for name in dict.fromkeys(chosen) if name in MEAN_NAMES]
+    variances = [name for name in dict.fromkeys(chosen) if name in VARIANCE_NAMES]
+    scalars = ([OrderParameters(means)] if means else []) + ([BlockVariances(variances)] if variances else [])
+    return scalars, ([MProfile()] if "profile" in chosen else [])

@@ -67,6 +67,32 @@ def test_matrices_round_trip(tmp_path, backend):
     torch.testing.assert_close(fresh["sequence"], data.batch(5, seed=3)["sequence"])
 
 
+def test_order_parameter_probes_round_trip(tmp_path):
+    from icl import measure_variances, order_parameter_probes
+    cfg = make_config("reduced")
+    torch.manual_seed(1)
+    model, _, _ = build_model(cfg.model_args, cfg.optim_args, "cpu")
+    V, L, K = cfg.model_args.vocab_size, cfg.model_args.seq_len, cfg.data_args.K
+    test_batch, _ = preprocess_batch(generate_icl_batch(16, V, L, K))
+    scalars, artifacts = order_parameter_probes(cfg.extra_args.log_order_params)    # the default: everything
+    evaluator = Evaluator(scalars=scalars, artifacts=[ComposedMatrices(), *artifacts])
+    exp = ExperimentTracker(cfg.extra_args.experiment_name, tmp_path)
+    with exp.start_run(cfg, artifacts=True) as run:
+        run.track_metric(0, **evaluator.scalars(model, test_batch, step=0))
+        for schedule in ("artifact", "scalar"):
+            log_artifacts(run, evaluator.artifacts(model, test_batch, step=0, schedule=schedule), 0)
+        run_id = run.run_id
+
+    data = RunData(cfg.extra_args.experiment_name, run_id, base_dir=tmp_path)
+    measured = data.order_params(0, variances=True)
+    assert measured == pytest.approx(measure_variances(data.matrices(0), K) | data.order_params(0))
+    for name in ("M_on", "Q_N", "G_N", "var_Q_T", "var_G", "var_M_on_raw"):
+        assert name in data.metrics.columns
+    assert data.metrics.loc[0, "var_Q_T"] == pytest.approx(measured["var_Q_T"], rel=1e-5)
+    torch.testing.assert_close(data.profile(0), data.matrices(0)["M"].double().diagonal(-1))
+    assert data.steps("profile") == [0]
+
+
 def test_ansatz_init_keeps_the_order_parameters_of_the_draw():
     from icl import ansatz_matrices, build_model, measure_order_params
     cfg = make_config("reduced")

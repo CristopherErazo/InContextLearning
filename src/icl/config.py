@@ -82,6 +82,10 @@ class ExtraArgs:
     eval_chunk: int | None = None  # Test sequences per evaluation forward pass (None = data_args.batch_size)
     # Positions saved by the TriggerLogitTable artifact, as fractions of L: f -> mu = ceil(f*L)
     logit_positions: list[float] = field(default_factory=lambda: [0.5, 0.75, 1.0])
+    # Order parameters logged (icl.order_parameter_probes): the groups "means" (the six + Q_N, G_N),
+    # "variances" (the block variances) and "profile" (the sub-diagonal of M, an artifact saved at every
+    # scalar evaluation), and/or single metric names such as "M_on" or "var_Q_T". [] logs none.
+    log_order_params: list[str] = field(default_factory=lambda: ["means", "variances", "profile"])
     
 
 

@@ -34,6 +34,7 @@ from ..data import occurrence_counts
 ArtifactKey = tuple[str, str | None]    # (name, group)
 ArtifactValue = tuple[Any, str]          # (data, tracklab type: 'tensor' | 'pickle' | 'torch')
 Artifacts = dict[ArtifactKey, ArtifactValue]
+SCHEDULES = ("artifact", "scalar")       # when an artifact probe is saved: at the artifact or the scalar steps
 
 
 class EvalContext:
@@ -174,8 +175,10 @@ class Probe(Protocol):
 
     Scalar probes return `float | dict[str, float]`; a dict is merged into the
     metrics under its own keys. Artifact probes return `Any | dict[str, Any]`
-    and may set two optional class attributes: `group` (artifact subfolder,
-    default None) and `atype` (tracklab serializer, default 'tensor').
+    and may set three optional class attributes: `group` (artifact subfolder,
+    default None), `atype` (tracklab serializer, default 'tensor') and
+    `schedule` ('artifact', the default, or 'scalar' for an artifact saved at
+    every scalar evaluation).
     """
     name: str
 
@@ -193,6 +196,10 @@ class Evaluator:
         for probe in (*self.scalar_probes, *self.artifact_probes):
             if not isinstance(probe, Probe):
                 raise TypeError(f"{probe!r} is not a probe: it needs a `name` and must be callable")
+        # the schedules the artifact probes ask for, so a loop knows whether to save artifacts at scalar steps
+        self.artifact_schedules = {getattr(probe, "schedule", "artifact") for probe in self.artifact_probes}
+        if not self.artifact_schedules <= set(SCHEDULES):
+            raise ValueError(f"artifact schedules must be in {SCHEDULES}, got {sorted(self.artifact_schedules)}")
 
     def context(self, model, batch: dict, step: int | None = None) -> EvalContext:
         """The context for `step`, reused if it was already built for the same
@@ -214,11 +221,17 @@ class Evaluator:
                 out[name] = float(value)
         return out
 
-    def artifacts(self, model, batch: dict, step: int | None = None) -> Artifacts:
+    def artifacts(self, model, batch: dict, step: int | None = None, schedule: str = "artifact") -> Artifacts:
         """{(name, group): (data, type)}: the shape Rewind's `eval_artifacts_fn`
-        contract accepts and `log_artifacts` below writes."""
+        contract accepts and `log_artifacts` below writes. Only the probes whose
+        `schedule` is `schedule`: "artifact" at the artifact steps, "scalar" at the
+        scalar steps."""
+        if schedule not in SCHEDULES:
+            raise ValueError(f"schedule must be one of {SCHEDULES}, got {schedule!r}")
         ctx, out = self.context(model, batch, step), {}
         for probe in self.artifact_probes:
+            if getattr(probe, "schedule", "artifact") != schedule:
+                continue
             group = getattr(probe, "group", None)
             atype = getattr(probe, "atype", "tensor")
             result = probe(ctx)

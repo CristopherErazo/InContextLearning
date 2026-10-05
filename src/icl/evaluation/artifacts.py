@@ -27,6 +27,18 @@ class ComposedMatrices:
         return {self.name: {name: matrix.numpy() for name, matrix in ctx.matrices.items()}}
 
 
+class MProfile:
+    """The previous-token profile, the sub-diagonal `M.diagonal(-1)` of `ctx.matrices`
+    (entry i is M[i+1, i]): `profile/M_profile_step_N.npy`, saved at every scalar
+    evaluation (`schedule = "scalar"`), not only on the artifact schedule. Read it back
+    with `icl.RunData.profile`."""
+
+    name, group, schedule = "M_profile", "profile", "scalar"
+
+    def __call__(self, ctx: EvalContext) -> torch.Tensor:
+        return ctx.matrices["M"].diagonal(-1).clone()
+
+
 class TriggerLogitTable:
     """`icl.theory.logit_table` of the model on the test batch, at the positions
     mu = ceil(f * L) for f in `fractions`: ONE pickle `logits/table_step_N.pkl`

@@ -21,7 +21,7 @@ from tracklab import ExperimentTracker
 from icl import (
     ComposedMatrices, Evaluator, LossMetric, MinimalTransformer, TriggerLogitTable,
     TopKAccuracy, TrainerArgs, compute_loss, generate_icl_batch, get_evaluation_times,
-    get_optimizer, load_config, preprocess_batch, set_matmul_precision, set_seed,
+    get_optimizer, load_config, order_parameter_probes, preprocess_batch, set_matmul_precision, set_seed,
 )
 
 
@@ -49,9 +49,10 @@ def build_controller(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -
 
     # ---- fixed test batch and probes ----
     test_batch, batch_stats = preprocess_batch(generate_icl_batch(TB, V, L, K, device=gen_device), device)
+    order_scalars, order_artifacts = order_parameter_probes(cfg.extra_args.log_order_params)
     evaluator = Evaluator(
-        scalars=[TopKAccuracy(1), LossMetric()],
-        artifacts=[ComposedMatrices(), TriggerLogitTable(cfg.extra_args.logit_positions)],
+        scalars=[TopKAccuracy(1), LossMetric(), *order_scalars],
+        artifacts=[ComposedMatrices(), TriggerLogitTable(cfg.extra_args.logit_positions), *order_artifacts],
         chunk=cfg.extra_args.eval_chunk or B,
     )
 
@@ -70,7 +71,12 @@ def build_controller(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -
         return evaluator.scalars(model, test_batch, step=controller.step)
 
     def eval_artifacts_fn():
-        return evaluator.artifacts(model, test_batch, step=controller.step)
+        # the artifacts saved at every scalar evaluation (MProfile), then those of the artifact schedule
+        step = controller.step
+        artifacts = evaluator.artifacts(model, test_batch, step=step, schedule="scalar") if step in eval_steps else {}
+        if step in artifact_steps:
+            artifacts |= evaluator.artifacts(model, test_batch, step=step)
+        return artifacts
 
     # ---- tracker run and launch handshake ----
     exp = ExperimentTracker(cfg.extra_args.experiment_name, cfg.extra_args.base_dir)
@@ -95,7 +101,8 @@ def build_controller(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -
     )
     eval_steps, artifact_steps = get_evaluation_times(cfg.extra_args)
     controller.eval_schedule = eval_steps
-    controller.eval_artifacts_schedule = artifact_steps if cfg.extra_args.track_artifacts else set()
+    scalar_artifact_steps = eval_steps if "scalar" in evaluator.artifact_schedules else set()
+    controller.eval_artifacts_schedule = artifact_steps | scalar_artifact_steps if cfg.extra_args.track_artifacts else set()
 
     log = controller.logger
     log.info(f"Experiment: {cfg.extra_args.experiment_name}")

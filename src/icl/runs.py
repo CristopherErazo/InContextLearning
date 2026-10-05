@@ -9,6 +9,8 @@
     run.batch(4096, seed=0)  # a fresh, unfiltered batch with the run's V, L, K
     run.order_params(step)   # every registered order parameter, measured from the matrices
     run.order_params(step, profile=True)   # ... plus "M_profile", the measured sub-diagonal of M
+    run.order_params(step, variances=True) # ... plus the block variances (icl.measure_variances)
+    run.profile(step)        # the sub-diagonal of M saved by the MProfile probe
     run.logit_table(step)    # the TriggerLogitTable probe's QueryTable
 
 `step` is an int, "first" or "last" everywhere. Everything is read lazily and
@@ -26,7 +28,7 @@ from tracklab import ExperimentReader
 from .config import TrainerArgs
 from .data import generate_icl_batch
 from .reduced import ReducedTransformer
-from .theory import QueryTable, measure_order_params
+from .theory import QueryTable, measure_order_params, measure_variances
 
 
 class RunData:
@@ -97,16 +99,24 @@ class RunData:
         return ReducedTransformer.from_matrices(self.matrices(step), self.config.model_args,
                                                 device=device, dtype=dtype)
 
-    def order_params(self, step="last", profile: bool = False) -> dict:
+    def order_params(self, step="last", profile: bool = False, variances: bool = False) -> dict:
         """Every order parameter of `icl.theory.ORDER_PARAMS`, measured from the
         matrices at `step` (so also ones added after the run was made). With
         `profile=True` also "M_profile": the measured sub-diagonal of M (float64),
-        which `ansatz_logits`, `EffectiveLoss` and `integrate` use in place of M_on."""
+        which `ansatz_logits`, `EffectiveLoss` and `integrate` use in place of M_on.
+        With `variances=True` also the block variances of `icl.measure_variances`
+        (the eight blocks, the pooled "var_M", "var_Q", "var_G" and "var_M_on_raw")."""
         matrices = self.matrices(step)
         order_params = measure_order_params(matrices, self.config.data_args.K)
         if profile:
             order_params["M_profile"] = matrices["M"].double().diagonal(-1).clone()
+        if variances:
+            order_params.update(measure_variances(matrices, self.config.data_args.K))
         return order_params
+
+    def profile(self, step="last") -> torch.Tensor:
+        """The sub-diagonal of M saved by the MProfile probe at `step` (float64)."""
+        return torch.as_tensor(self.load("profile", "M_profile", step)).double()
 
     def logit_table(self, step="last") -> QueryTable:
         """The logit table saved by the TriggerLogitTable probe at `step`."""

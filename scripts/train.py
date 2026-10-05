@@ -35,10 +35,10 @@ from omegaconf import OmegaConf
 from tracklab import ExperimentTracker
 
 from icl import (
-    ComposedMatrices, Evaluator, LossMetric, OrderParameters, TopKAccuracy, TrainerArgs,
+    ComposedMatrices, Evaluator, LossMetric, TopKAccuracy, TrainerArgs,
     TriggerLogitTable, build_model,
     compute_loss, generate_icl_batch, get_evaluation_times, load_config, log_artifacts,
-    preprocess_batch, set_matmul_precision, set_seed,
+    order_parameter_probes, preprocess_batch, set_matmul_precision, set_seed,
 )
 
 
@@ -72,12 +72,14 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
     test_batch, batch_stats = preprocess_batch(generate_icl_batch(TB, V, L, K, device=gen_device), device)
     # The test batch is evaluated `eval_chunk` sequences at a time. Its default, the
     # training batch size, needs less memory than a training step (no autograd graph).
+    order_scalars, order_artifacts = order_parameter_probes(cfg.extra_args.log_order_params)
     evaluator = Evaluator(
         scalars=[TopKAccuracy(1),
                  LossMetric(),
-                 OrderParameters()],
+                 *order_scalars],
         artifacts=[ComposedMatrices(),
-                   TriggerLogitTable(cfg.extra_args.logit_positions)],
+                   TriggerLogitTable(cfg.extra_args.logit_positions),
+                   *order_artifacts],
         chunk=cfg.extra_args.eval_chunk or B,
     )
     eval_steps, artifact_steps = get_evaluation_times(cfg.extra_args)
@@ -113,6 +115,8 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
                 metrics = evaluator.scalars(model, test_batch, step=step)
                 run.track_metric(step, **metrics)
                 log.info(format_metrics(step, total_steps, metrics, log_metrics))
+                if track_artifacts:      # the artifacts saved at every scalar evaluation (MProfile)
+                    log_artifacts(run, evaluator.artifacts(model, test_batch, step=step, schedule="scalar"), step)
             if step in artifact_steps:
                 save_artifacts(run, log, step)
         eval_time += time.perf_counter() - t

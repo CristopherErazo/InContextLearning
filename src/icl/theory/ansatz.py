@@ -20,6 +20,13 @@ The previous-token diagonal can also be a *profile*
 `M.diagonal(-1)` (entry i is M[i+1, i], the key at code position i+1). It
 replaces M_on in the logits and in `ansatz_matrices`. M_on stays the scalar that
 is measured and logged (the mean of the profile).
+
+The variance ansatz (paper/scratch/2026-10-05-0036_variance-profile-ansatz-explicit.tex)
+adds the spread of every block around its mean: VARIANCES holds the eight block
+variances ("var_M_on", ..., "var_G_N"), POOLED_VARIANCES the one-per-matrix ones
+("var_M", "var_Q", "var_G") that stand in for any block of the matrix without its own
+key. Like the means, a missing variance counts as 0, so no variance key = no noise.
+LEVELS names the keys each simplification level of the note keeps (`at_level`).
 """
 from __future__ import annotations
 
@@ -56,6 +63,14 @@ def _all_trigger_rows(L, V, K):        # Gamma_{tau b}, tau a trigger, every b
     return _trigger_rows(V, K).clone()
 
 
+def _non_trigger_rows(L, V, K):        # Q_{ac}, a not a trigger, every c
+    return ~_trigger_rows(V, K)
+
+
+def _non_trigger_off_diagonal(L, V, K):    # Gamma_{tau b}, tau not a trigger, b != tau
+    return ~_trigger_rows(V, K) & ~torch.eye(V, dtype=torch.bool)
+
+
 PROFILE = "M_profile"                  # optional key: the previous-token diagonal as a tensor
 
 # name -> (matrix, support(L, V, K) -> bool mask of that matrix's shape).
@@ -69,35 +84,139 @@ ORDER_PARAMS = {
     "G_T": ("G", _all_trigger_rows),
 }
 
+# Means that are 0 in the ansatz (no task-aligned direction), measured as diagnostics only.
+DIAGNOSTIC_MEANS = {
+    "Q_N": ("Q", _non_trigger_rows),
+    "G_N": ("G", _non_trigger_off_diagonal),
+}
+
+# name -> (matrix, support): the eight blocks of the variance ansatz. The value is the
+# variance of the block's entries around their own mean, except "var_M_on", the spread
+# of the sub-diagonal around its smooth profile (see `measure_variances`).
+VARIANCES = {
+    "var_M_on": ("M", _previous_token),
+    "var_M_off": ("M", _bulk),
+    "var_Q_on": ("Q", _trigger_diagonal),
+    "var_Q_T": ("Q", _trigger_off_diagonal),
+    "var_Q_N": ("Q", _non_trigger_rows),
+    "var_G_on": ("G", _non_trigger_diagonal),
+    "var_G_T": ("G", _all_trigger_rows),
+    "var_G_N": ("G", _non_trigger_off_diagonal),
+}
+
+# name -> matrix: one variance per matrix, the pooled within-block variance (the
+# size-weighted mean of its blocks' variances, not the raw variance of the matrix).
+POOLED_VARIANCES = {"var_M": "M", "var_Q": "Q", "var_G": "G"}
+
+SIGNAL = ("M_on", "Q_on", "G_on")
+
+# The simplification levels of the note: the keys each level keeps (the rest count as 0).
+LEVELS = {
+    "S0": (*ORDER_PARAMS, PROFILE, *VARIANCES),            # profile, six means, eight variances
+    "S1": (*ORDER_PARAMS, PROFILE, *POOLED_VARIANCES),     # one variance per matrix
+    "S2": (*ORDER_PARAMS, *POOLED_VARIANCES),              # no profile
+    "S3": tuple(ORDER_PARAMS),                             # no spread: the extended ansatz
+    "S4": (*SIGNAL, *POOLED_VARIANCES),                    # signal + noise floor
+    "S5": SIGNAL,                                          # signal only (the progress report)
+}
+
+
+def at_level(order_params: dict, level: str) -> dict:
+    """The entries of `order_params` that `level` (a key of LEVELS) keeps; the others
+    are dropped, i.e. count as 0. E.g. `at_level(run.order_params(0, variances=True), "S5")`
+    is the signal-only model."""
+    if level not in LEVELS:
+        raise ValueError(f"level must be one of {list(LEVELS)}, got {level!r}")
+    return {name: value for name, value in order_params.items() if name in LEVELS[level]}
+
+
+def block_variance(order_params: dict, name: str):
+    """The variance of the block `name` (a key of VARIANCES): its own entry of
+    `order_params`, else the pooled one of its matrix, else 0."""
+    pooled = "var_" + VARIANCES[name][0]
+    return order_params.get(name, order_params.get(pooled, 0.0))
+
 
 def support_sizes(L: int, V: int, K: int) -> dict[str, int]:
     """Number of matrix entries each order parameter averages over."""
     return {name: int(support(L, V, K).sum()) for name, (_, support) in ORDER_PARAMS.items()}
 
 
+def variance_sizes(L: int, V: int, K: int) -> dict[str, int]:
+    """Number of entries of each block of VARIANCES, and of each matrix for the
+    pooled ones of POOLED_VARIANCES (the sum of its blocks)."""
+    sizes = {name: int(support(L, V, K).sum()) for name, (_, support) in VARIANCES.items()}
+    pooled_sizes = {pooled: sum(size for name, size in sizes.items() if VARIANCES[name][0] == matrix_name)
+                    for pooled, matrix_name in POOLED_VARIANCES.items()}
+    return {**sizes, **pooled_sizes}
+
+
+def _block_entries(matrices: dict, registry: dict, K: int) -> dict[str, torch.Tensor]:
+    L, V = matrices["M"].shape[0], matrices["Q"].shape[0]
+    entries = {}
+    for name, (matrix_name, support) in registry.items():
+        matrix = torch.as_tensor(matrices[matrix_name])
+        entries[name] = matrix[support(L, V, K).to(matrix.device)]
+    return entries
+
+
 def measure_order_params(matrices: dict, K: int) -> dict[str, float]:
     """Every registered order parameter of the matrices {"M", "Q", "G"} (the
     `model.matrices()` convention): the mean of its matrix over its support."""
-    L, V = matrices["M"].shape[0], matrices["Q"].shape[0]
-    order_params = {}
-    for name, (matrix_name, support) in ORDER_PARAMS.items():
-        matrix = torch.as_tensor(matrices[matrix_name])
-        order_params[name] = matrix[support(L, V, K).to(matrix.device)].mean().item()
-    return order_params
+    return {name: entries.mean().item() for name, entries in _block_entries(matrices, ORDER_PARAMS, K).items()}
 
 
-def ansatz_matrices(order_params: dict, L: int, V: int, K: int, dtype=torch.float64) -> dict[str, torch.Tensor]:
+def measure_diagnostic_means(matrices: dict, K: int) -> dict[str, float]:
+    """The means of DIAGNOSTIC_MEANS (Q_N, G_N), which the ansatz sets to 0."""
+    return {name: entries.mean().item() for name, entries in _block_entries(matrices, DIAGNOSTIC_MEANS, K).items()}
+
+
+def measure_variances(matrices: dict, K: int) -> dict[str, float]:
+    """The block variances of the matrices {"M", "Q", "G"}: the eight of VARIANCES
+    (each block's entries around their own mean), the three of POOLED_VARIANCES and
+    "var_M_on_raw".
+
+    "var_M_on" is the spread of the sub-diagonal around its smooth profile, half the
+    mean squared difference of neighbouring entries (biased by (M_on phi')^2 / (2 L^2)
+    only); "var_M_on_raw" is its spread around M_on, profile included: the value a
+    model without the profile sees."""
+    entries = {name: values.double() for name, values in _block_entries(matrices, VARIANCES, K).items()}
+    variances = {name: values.var(unbiased=False).item() for name, values in entries.items()}
+    sub_diagonal = torch.as_tensor(matrices["M"]).double().diagonal(-1)
+    raw = variances["var_M_on"]
+    variances["var_M_on"] = 0.5 * sub_diagonal.diff().pow(2).mean().item()
+    for pooled, matrix_name in POOLED_VARIANCES.items():
+        blocks = [name for name, (block_matrix, _) in VARIANCES.items() if block_matrix == matrix_name]
+        size = sum(entries[name].numel() for name in blocks)
+        variances[pooled] = sum(entries[name].numel() * variances[name] for name in blocks) / size
+    variances["var_M_on_raw"] = raw
+    return variances
+
+
+def ansatz_matrices(order_params: dict, L: int, V: int, K: int, dtype=torch.float64,
+                    noise: torch.Generator | None = None) -> dict[str, torch.Tensor]:
     """The matrices {"M", "Q", "G"} of the ansatz: each registered order
     parameter's value on its support, zero everywhere else (a parameter missing
     from `order_params` counts as 0), and the profile on the sub-diagonal of M if
     `order_params["M_profile"]` is given. `measure_order_params` of the result
-    gives the scalar order parameters back (M_on as the mean of the profile)."""
+    gives the scalar order parameters back (M_on as the mean of the profile).
+
+    With a generator as `noise`, every block also gets i.i.d. Gaussian fluctuations
+    with its variance in `order_params` (`block_variance`: own key, else pooled,
+    else none): a draw of the variance ansatz."""
     shapes = {"M": (L, L), "Q": (V, V), "G": (V, V)}
     matrices = {name: torch.zeros(shape, dtype=dtype) for name, shape in shapes.items()}
     for name, (matrix_name, support) in ORDER_PARAMS.items():
         matrices[matrix_name][support(L, V, K)] = float(order_params.get(name, 0.0))
     if PROFILE in order_params:
         matrices["M"].diagonal(-1).copy_(_check_profile(order_params[PROFILE], L).detach())
+    if noise is not None:
+        for name, (matrix_name, support) in VARIANCES.items():
+            variance = float(block_variance(order_params, name))
+            if variance:
+                mask = support(L, V, K)
+                matrices[matrix_name][mask] += variance ** 0.5 * torch.randn(int(mask.sum()), generator=noise,
+                                                                           dtype=dtype)
     return matrices
 
 

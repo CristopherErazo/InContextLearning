@@ -170,11 +170,13 @@ builds it; `scripts/launcher.py` refuses `backend != "full"`.
 `.config` (typed TrainerArgs as saved), `.metrics` (wide DataFrame indexed by step),
 `.steps(group)`, `.load(group, name, step)`, `.matrices(step)`, `.model(step)` (a
 `ReducedTransformer.from_matrices`, exact for lin_attn runs) and `.batch(n, seed)` (a
-fresh unfiltered batch with the run's V, L, K), `.order_params(step)` (every registered
-order parameter, measured from the saved matrices) and `.logit_table(step)` (the
+fresh unfiltered batch with the run's V, L, K), `.order_params(step, profile=False,
+variances=False)` (every registered order parameter, measured from the saved matrices;
+`variances=True` adds `measure_variances`), `.profile(step)` (the `MProfile` probe's
+sub-diagonal of M) and `.logit_table(step)` (the
 `TriggerLogitTable` probe's `QueryTable`). `step` is an int, `"first"` or `"last"`.
 `tests/test_runs.py` checks the round trip model → artifact → `RunData.model` keeps the
-logits for both backends.
+logits for both backends, and the order-parameter probes → metrics / `RunData`.
 
 **Effective model (`src/icl/theory/`, paper/scratch/extended_ansatz.tex).** Conventions:
 positions are the paper's `mu = code position + 1`, `ell` = earlier occurrences of the
@@ -193,7 +195,19 @@ triggers (by trigger), `[2K-1,V-1)` the rest (by id), `V-1` the target.
   definition of the order parameters (value = mean over the support);
   `measure_order_params`, `ansatz_matrices` (inverse of the former), `support_sizes`,
   and `ansatz_logits(vars, op, beta, L)` (eq. logit_classes_explicit; a missing
-  parameter counts as 0).
+  parameter counts as 0). The variance ansatz
+  (paper/scratch/2026-10-05-0036_variance-profile-ansatz-explicit.tex): `VARIANCES`, the
+  eight blocks `var_M_on, var_M_off, var_Q_on, var_Q_T, var_Q_N, var_G_on, var_G_T,
+  var_G_N` (variance around the block's own mean; `var_M_on` around the smooth profile,
+  half the mean squared neighbouring difference), and `POOLED_VARIANCES` `var_M, var_Q,
+  var_G` (pooled within-block, not the raw matrix variance), which stand in for any
+  block of their matrix without its own key (`block_variance(op, name)`); a missing
+  variance counts as 0, i.e. no noise. `measure_variances(matrices, K)` (the 8 + 3 and
+  `var_M_on_raw`, the sub-diagonal around M_on), `variance_sizes`, `DIAGNOSTIC_MEANS`
+  `Q_N, G_N` (zero in the ansatz, measured by `measure_diagnostic_means`),
+  `ansatz_matrices(op, ..., noise=generator)` (adds i.i.d. Gaussian block noise: a draw
+  of the variance ansatz), and `LEVELS` S0..S5 with `at_level(op, level)` (the keys each
+  simplification level keeps; `"S5"` = `SIGNAL` = M_on, Q_on, G_on).
 - `variables.py`: the Table 1 variables (paper names `N, F, R, W, P` and `U_bar, W_bar,
   P_bar`) from three sources, all `QueryTable`s ready for `ansatz_logits`:
   `measure_variables(batch, mus)` (exact, rows aligned one to one with `logit_table` on
@@ -252,6 +266,9 @@ Only `ansatz.py` and `variables.py` know the ansatz; extending it = register the
 parameter + add its terms (and variables). `tests/test_theory.py` runs the model on
 `ansatz_matrices(op)` and requires `ansatz_logits(measure_variables(...))` to match to
 1e-12 at every trigger query: keep it passing when the ansatz changes.
+`tests/test_variances.py` checks the block-variance estimators on `noise=` draws with
+known variances (the sub-diagonal around a smooth profile included), the pooled
+variances, `at_level` and the order-parameter probes.
 
 **Training helpers (`src/icl/training.py`).** `build_model(model_args, optim_args,
 device)` returns `(model, optimizer, log_line)` for either backend (the full path is
@@ -280,8 +297,11 @@ of `icl.evaluation`.
   *probe* is any callable with a `name` taking an `EvalContext` (the `Probe` protocol).
   `Evaluator(scalars=[...], artifacts=[...], chunk)` memoizes the context on `step`:
   `scalars(model, batch, step)` returns `dict[str, float]` (a probe may return a dict,
-  merged), `artifacts(model, batch, step)` returns `{(name, group): (data, type)}`, and
-  both calls at the same step share one forward pass. Tensors are moved to CPU / numpy
+  merged), `artifacts(model, batch, step, schedule="artifact")` returns `{(name, group):
+  (data, type)}` of the artifact probes whose class attribute `schedule` (default
+  `"artifact"`) matches; `"scalar"` ones are saved at every scalar evaluation (both
+  scripts do so; `evaluator.artifact_schedules` says whether any probe asks), and
+  all calls at the same step share one forward pass. Tensors are moved to CPU / numpy
   during packing, so probes stay device-agnostic. `log_artifacts(run, artifacts, step)`
   writes that dict to a TrackLab run (Rewind consumes the same dict directly).
 - `scalars.py`: scalar probes. `LossMetric(name=None, positions="all"|"trigg"|"non_trigg",
@@ -289,15 +309,21 @@ of `icl.evaluation`.
   `loss_trigg`, `loss_trigg_ell0`, `loss_trigg_ell_ge1`, ...; NaN when no position of
   the test batch matches, e.g. an ell too large). `TopKAccuracy` and `TargetProbMass`
   are the in-context metrics: trigger queries with ell >= 1 only, NaN if there are
-  none. `OrderParameters` logs every entry of `icl.theory.ORDER_PARAMS` from `matrices`
-  (finite at d = inf). Add new metrics here.
-- `artifacts.py`: artifact probes; class attributes `group` (artifact subfolder) and
-  `atype` (TrackLab serializer, default `tensor`). A dict result saves one artifact per
-  key, so a probe that wants a single pickled dict returns `{self.name: payload}`
-  (`ComposedMatrices` writes one `matrices/matrices_step_N.pkl` holding
+  none. `OrderParameters(names=None)` logs the block means from `matrices` (finite at
+  d = inf; default every entry of `icl.theory.ORDER_PARAMS`, `names` may add `Q_N`,
+  `G_N`), `BlockVariances(names=None)` the block variances (`measure_variances`).
+  `order_parameter_probes(names)` turns `extra_args.log_order_params` (groups `"means"`,
+  `"variances"`, `"profile"` and/or single metric names; default all three; `[]` = none)
+  into (scalar probes, artifact probes); both scripts use it. Add new metrics here.
+- `artifacts.py`: artifact probes; class attributes `group` (artifact subfolder),
+  `atype` (TrackLab serializer, default `tensor`) and `schedule` (default `"artifact"`).
+  A dict result saves one artifact per key, so a probe that wants a single pickled dict
+  returns `{self.name: payload}` (`ComposedMatrices` writes one `matrices/matrices_step_N.pkl` holding
   `model.matrices()` as a dict of numpy arrays; `TriggerLogitTable(fractions)` writes
   `logits/table_step_N.pkl`, the `logit_table` of the test batch at
-  `mu = ceil(f*L)` for `f` in `extra_args.logit_positions`, as a numpy dict).
+  `mu = ceil(f*L)` for `f` in `extra_args.logit_positions`, as a numpy dict; `MProfile`
+  writes `profile/M_profile_step_N.npy`, the sub-diagonal of M, at every scalar evaluation:
+  `schedule = "scalar"`).
 - `schedule.py`: `get_evaluation_times(extra_args)` turns `n_prints` / `n_prints_model`
   / `print_scale` into two step sets spanning `[0, total_steps]` inclusive. Evaluation
   at step `s` sees the weights before the s-th update, so `total_steps` is the final
@@ -306,7 +332,9 @@ of `icl.evaluation`.
 **Launcher (`scripts/launcher.py`).** Composition root for controllable runs.
 `build_controller` wires three closures — `train_step_fn`, `eval_fn`, `eval_artifacts_fn`
 — plus a TrackLab run into `rewind.TrainerController`, then sets
-`controller.eval_schedule` / `eval_artifacts_schedule` to the computed step sets. The
+`controller.eval_schedule` / `eval_artifacts_schedule` to the computed step sets (the
+artifact one also holds the scalar steps when a probe has `schedule = "scalar"`, and
+`eval_artifacts_fn` picks the probes by step). The
 two eval closures call `evaluator.scalars/artifacts(..., step=controller.step)`: Rewind
 runs them back to back at the same step, so they share one `EvalContext`. `enable_control`
 attaches a `RunMailbox` (dashboard pause/resume/rewind commands), `enable_rewind` turns on
