@@ -228,6 +228,13 @@ def _check_profile(profile, L: int) -> torch.Tensor:
     return profile
 
 
+def _take(vector: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """vector[index] for an integer index of any shape, by index_select: the same values,
+    but the backward accumulates by atomic adds, while the backward of advanced indexing
+    sorts the indices on CUDA (50-60x slower here: millions of repeated key positions)."""
+    return vector.index_select(0, index.reshape(-1)).view(index.shape)
+
+
 def _previous_token_sums(variables: QueryTable, order_params: dict, L: int, dtype, device) -> dict:
     """The previous-token diagonal summed over the keys each logit uses:
     "witness" (the keys after the earlier a's), "free" (the free target keys),
@@ -244,12 +251,12 @@ def _previous_token_sums(variables: QueryTable, order_params: dict, L: int, dtyp
                 "tokens": M_on * variables["U_bar"], "all": M_on * n_keys.to(dtype)}
     profile = _check_profile(order_params[PROFILE], L).to(dtype=dtype, device=device)
     by_code_position = torch.cat([profile.new_zeros(1), profile])      # key at code position j -> M[j, j-1]
-    total = by_code_position.cumsum(0)[n_keys]                            # keys are code positions 1..mu-2
+    total = _take(by_code_position.cumsum(0), n_keys)                    # keys are code positions 1..mu-2
     window_mean = total / n_keys.clamp(min=1).to(dtype)
     sums = {"all": total}
     for name, keys, count in (("witness", "N_keys", "N"), ("free", "F_keys", "F"), ("tokens", "U_keys", "U_bar")):
         if keys in variables:
-            sums[name] = by_code_position[variables[keys]].sum(-1)
+            sums[name] = _take(by_code_position, variables[keys]).sum(-1)
         else:
             mean = window_mean if variables[count].dim() == 1 else window_mean[:, None]
             sums[name] = variables[count] * mean
@@ -296,5 +303,4 @@ def _brackets(variables: QueryTable, order_params: dict, L: int) -> dict[str, to
     R, W, P = (variables[name] for name in ("R", "W", "P"))
     return {"target": Q_on * on["witness"] + Q_T * on["free"] + M_off * Q_T * W + M_off * delta_Q * P,
             "trigger": Q_T * on["all"] + M_off * Q_T * sum_keys + delta_Q * on["witness"] + M_off * delta_Q * R,
-            "non_target": (Q_T * on["tokens"] + M_off * Q_T * variables["W_bar"]
-                           + M_off * delta_Q * variables["P_bar"])}
+            "non_target": Q_T * on["tokens"] + M_off * Q_T * variables["W_bar"] + M_off * delta_Q * variables["P_bar"]}

@@ -22,7 +22,7 @@ import math
 
 import torch
 
-from .ansatz import (ORDER_PARAMS, PROFILE, VARIANCES, _brackets, _check_profile, _previous_token_sums,
+from .ansatz import (ORDER_PARAMS, PROFILE, VARIANCES, _brackets, _check_profile, _previous_token_sums, _take,
                      ansatz_logits, block_variance)
 from .query_table import QueryTable, logit_blocks
 
@@ -57,7 +57,7 @@ def _key_sums(diagonal: torch.Tensor, M_off, n_keys: torch.Tensor, var_M_on, var
     sources): D, G1, K1, K2, J2, and the diagonal summed ("all") and averaged ("mean")
     over the keys."""
     position = torch.arange(len(diagonal), dtype=diagonal.dtype, device=diagonal.device)
-    m1, m2, position_m = (values.cumsum(0)[n_keys] for values in (diagonal, diagonal ** 2, position * diagonal))
+    m1, m2, position_m = (_take(values.cumsum(0), n_keys) for values in (diagonal, diagonal ** 2, position * diagonal))
     n = n_keys.to(diagonal.dtype)
     pairs = n * (n - 1) / 2                          # sum_j (j - 1)
     squares = (n - 1) * n * (2 * n - 1) / 6          # sum_j (j - 1)^2 = sum_j (n - j)^2
@@ -77,11 +77,11 @@ def _witness_sums(witness_keys: torch.Tensor, diagonal: torch.Tensor, M_off, n_k
     is_real = witness_keys > 0
     position = torch.arange(len(diagonal), dtype=diagonal.dtype, device=diagonal.device)
     key_weight_up_to = diagonal.cumsum(0) + M_off * position * (position - 1) / 2      # sum of k_i over i <= j
-    X1 = ((key_weight_up_to[n_keys][:, None] - key_weight_up_to[witness_keys]) * is_real).sum(1)
+    X1 = ((_take(key_weight_up_to, n_keys)[:, None] - _take(key_weight_up_to, witness_keys)) * is_real).sum(1)
     later = torch.maximum(witness_keys[:, :, None], witness_keys[:, None, :])
     both = is_real[:, :, None] & is_real[:, None, :]
     X2 = ((n_keys[:, None, None] - later) * both).sum((1, 2)).to(diagonal.dtype)
-    on_witness = diagonal[witness_keys]
+    on_witness = _take(diagonal, witness_keys)
     return {"X1": X1, "X2": X2, "witness_squared": (on_witness ** 2).sum(1),
             "witness_sent": (on_witness * (on_witness + M_off * (n_keys[:, None] - witness_keys) * is_real)).sum(1)}
 

@@ -408,7 +408,17 @@ accuracy. `scripts/L_sweep_controls.py` (ansatz-init reruns of the d = inf `L_sw
 runs) and `scripts/L_sweep_flows.py` (effective flows of the signal / trigger / extended
 variants, to `data/effective_L_sweep/`, rates from `exact_rates`; the sigma_0 = 0.5 flows
 written before 2026-10-05 had Q rates 4x too large) feed
-`notebooks/26-10-04_L_sweep_effective.ipynb`.
+`notebooks/26-10-04_L_sweep_effective.ipynb`. `scripts/L_sweep_setup_flows.py` runs the
+effective flows of the setups of `notebooks/26-10-05_Ansatz-check.ipynb` (signal, means, + noise,
++ entry-wise profile) from the step-0 order parameters of `L_sweep_B1024` (`--seeds`, `--Ls`,
+`--setups`), with RK45 (LSODA needs 2-3x more evaluations with the 511-1023 profile entries)
+in doubling chunks until the loss is half-way to L^infty; it writes per-flow pickles and
+`learning_times.csv` (flow vs real T*) to `data/effective_setups_B1024/` and resumes.
+`notebooks/26-10-05_L512_ansatz_study.ipynb` compares empirical and ansatz logits of
+`data/L512_ansatz_study` (a dense rerun of the seed-13 L = 512 run) and the effective loss
+per level. In `icl.theory`, index the profile by key positions with `ansatz._take`
+(index_select), not `vector[index]`: the backward of advanced indexing on CUDA is 50-60x
+slower with millions of repeated keys.
 `track_results` records `train_time` and `eval_time` separately, `ms_per_step` of
 training alone, and `peak_gpu_mem_gib`.
 
