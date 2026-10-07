@@ -77,8 +77,7 @@ def train(cfg: TrainerArgs, log_metrics=None, log_to_terminal=None) -> None:
         scalars=[TopKAccuracy(1),
                  LossMetric(),
                  *order_scalars],
-        artifacts=[ComposedMatrices(),
-                   TriggerLogitTable(cfg.extra_args.logit_positions),
+        artifacts=[ComposedMatrices(), # TriggerLogitTable(cfg.extra_args.logit_positions),
                    *order_artifacts],
         chunk=cfg.extra_args.eval_chunk or B,
     )

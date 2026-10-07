@@ -11,7 +11,7 @@ MIN_TOTAL_STEPS = 100  # lower bound on a budget derived from extra_args.alpha_s
 @dataclass
 class ModelArgs:
     vocab_size: int = 128 # Vocabulary size
-    d_model: int = 8000 # Model dimension
+    d_model: int = 4096 # Model dimension
     seq_len: int = 512 # Sequence length
     lin_attn: bool = True  # Whether to use linear attention or not
     beta: float = 0.25  # Scaling factor for output logits
@@ -34,7 +34,7 @@ class ModelArgs:
 @dataclass
 class DataArgs:
     alpha_batch: float = 1000.0  # Scaling factor for batch size ~1/(L * frac_solvable)
-    batch_size: int | None = field(default=512)  # Batch size (computed from alpha_batch) if given, overrides alpha_batch
+    batch_size: int | None = field(default=1024)  # Batch size (computed from alpha_batch) if given, overrides alpha_batch
     test_size: int = 512  # Number of samples in test set
     rho: float = 0.2  # Fraction of trigger tokens = K/vocab_size
     gen_device: str = "auto"  # Where batches are sampled: "cpu", "cuda", or "auto" (= training device)
@@ -65,11 +65,11 @@ class ExtraArgs:
     total_steps: int = field(default=3000)  # Total number of training steps
     stop_at_accuracy: float | None = None  # Stop once top1_accuracy reaches this (None = never)
     stop_at_loss: float | None = None  # Stop once the loss falls to this (None = never)
-    n_prints: int = 50  # Metric evaluation frequency
-    n_prints_model: int = 10  # Model checkpoint frequency
+    n_prints: int = 30  # Metric evaluation frequency
+    n_prints_model: int = 3  # Model checkpoint frequency
     print_scale: str = 'linear'  # Scale for evaluation: log or linear
-    experiment_name: str | None  = 'icl' # Experiment tracking name
-    seed: int | None = 42      # Random seed
+    experiment_name: str | None  = 'full_ansatz' # Experiment tracking name
+    seed: int | None = 321      # Random seed
     # float32 matmul mode: "highest" (true fp32), "high" (TF32 on Ampere+), "medium"
     # (bfloat16 inputs). Changes results as well as speed -- see icl.set_matmul_precision.
     matmul_precision: str = "highest"
@@ -90,6 +90,20 @@ class ExtraArgs:
 
 
 @dataclass
+class FlowArgs:
+    """Settings of an effective-model flow saved as a TrackLab run (scripts/L_sweep_setup_flows.py), so
+    that RunData can read it; empty for training runs. Stopgap until RunData reads non-training runs."""
+    setup: str = ""  # name of the setup: which order parameters move
+    keys: list[str] = field(default_factory=list)  # the order parameters of the setup
+    init: str = ""  # "measured" (step 0 of source_run) or "typical" (typical sizes at initialisation)
+    sign: int = 1  # typical init: the sign of M_on Q_on G_on
+    source_run: str = ""  # experiment/run_id of the training run the config (and a measured init) comes from
+    method: str = ""  # EffectiveLoss method
+    num_mus: int = 0  # positions mu the effective loss averages over
+    noise_samples: int = 0  # EffectiveLoss noise_samples
+
+
+@dataclass
 class TrainerArgs:
     """
     TrainerArgs is a dataclass that encapsulates all the configuration parameters required for training a model.
@@ -99,6 +113,7 @@ class TrainerArgs:
     data_args: DataArgs = field(default_factory=DataArgs)
     optim_args: OptimArgs = field(default_factory=OptimArgs)
     extra_args: ExtraArgs = field(default_factory=ExtraArgs)
+    flow_args: FlowArgs = field(default_factory=FlowArgs)
 
 
 def compute_derived_args(cfg: TrainerArgs) -> TrainerArgs:

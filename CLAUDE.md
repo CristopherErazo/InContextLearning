@@ -410,10 +410,17 @@ variants, to `data/effective_L_sweep/`, rates from `exact_rates`; the sigma_0 = 
 written before 2026-10-05 had Q rates 4x too large) feed
 `notebooks/26-10-04_L_sweep_effective.ipynb`. `scripts/L_sweep_setup_flows.py` runs the
 effective flows of the setups of `notebooks/26-10-05_Ansatz-check.ipynb` (signal, means, + noise,
-+ entry-wise profile) from the step-0 order parameters of `L_sweep_B1024` (`--seeds`, `--Ls`,
-`--setups`), with RK45 (LSODA needs 2-3x more evaluations with the 511-1023 profile entries)
-in doubling chunks until the loss is half-way to L^infty; it writes per-flow pickles and
-`learning_times.csv` (flow vs real T*) to `data/effective_setups_B1024/` and resumes.
++ entry-wise profile) over the L of `L_sweep_B1024`, from the typical initial values
+(`--init typical`, seed-free: means s_X/sqrt(n), G_on with the sign `--signs`, variances s_X^2,
+flat profile; reference T* = median over the 30 seeds) or the step-0 order parameters of a run
+(`--init measured --seeds`), in doubling chunks until the loss is half-way to L^infty, solver
+"auto" (LSODA up to 300 moving entries; the noise setups are stiff, RK45 crawls there; RK45 for
+the large profiles). Each flow is a TrackLab run (default experiment `setup_flows_B1024`) that
+RunData reads: `config.flow_args` (the `FlowArgs` of `config.py`, empty for training runs),
+`metrics` (order parameters + `loss`), `profile(step)`, results `T_f20`, `T_f50` and
+`T_reference_f20/50`; it resumes. (`data/effective_setups_B1024/` holds the older pickle output
+of the seed-13 measured sweep.) RunData assumes a `TrainerArgs` config and training artifacts;
+`FlowArgs` is a stopgap until RunData is generalised to such non-training runs.
 `notebooks/26-10-05_L512_ansatz_study.ipynb` compares empirical and ansatz logits of
 `data/L512_ansatz_study` (a dense rerun of the seed-13 L = 512 run) and the effective loss
 per level. In `icl.theory`, index the profile by key positions with `ansatz._take`
