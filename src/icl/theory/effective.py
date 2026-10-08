@@ -22,16 +22,20 @@ the logits are h + xi, xi Gaussian given the sequence, and the expectation is
 also over xi: the non-trigger part becomes the mean over mu of
 `non_trigger_loss` (log V + half the spread of the logit vector), and in CE
 
-- method="mc":   each sampled row adds one draw of xi (`sample_logits`), with
-                 normals drawn once in the constructor;
-- method="mean": the Gaussian closure at the mean logits (eq. CE_closure without
-                 the process part): the K individual trigger parts and the
-                 non-targets by e^{V/2}, the target and the common trigger part
-                 by quadrature, with the variances averaged over
-                 `noise_samples` draws of the variables per (mu, ell) (they are not
-                 linear in the variables), drawn on first use.
+- method="mc":   each sampled row adds one draw of xi (`sample_logits`, the moments
+                 given S_mu), with normals drawn once in the constructor;
+- method="mean": the Gaussian closure at the mean logits: the K individual trigger
+                 parts and the non-targets by e^{V/2}, the target and the common
+                 trigger part by quadrature, with the covariance given ell of the
+                 term layer (`terms.trigger_terms_ell`, closed form): the mean noise
+                 plus the spread of the means Cov(hbar | ell) (eq. cov_total; audit item
+                 c2). By default (spread="always") the closure is used also without
+                 variances, the spread of the means alone.
 
-Without any variance key both methods are exactly the signal-only loss.
+Without any variance key "mc" is exactly the signal-only loss (CE over the sampled
+variables) and "mean" with spread=False is CE at the mean logits. `keep` prunes the terms
+of the logit moments (`icl.theory.terms`), `Lambda` sets the occurrence rate of the
+ell-level moments ("mu": p_T mu, "n-2ell": p_T (mu - 2 - 2 ell)).
 
 `integrate` runs the gradient flow of such a loss in the order parameters
 (the variances multiplicatively), with the rates given by the caller;
@@ -49,7 +53,9 @@ from scipy.integrate import solve_ivp
 from scipy.stats import poisson
 
 from .ansatz import ORDER_PARAMS, POOLED_VARIANCES, PROFILE, VARIANCES, ansatz_logits, support_sizes, variance_sizes
-from .noise import _target_and_common, noise_variances, non_trigger_loss, sample_logits
+from .noise import (CLOSURE_PAIRS, _target_and_common, closure_variances, expand_classes, mean_logits, non_trigger_loss,
+                    sample_logits)
+from .terms import trigger_terms_ell
 from .query_table import QueryTable, cluster_cross_entropy, condition_mask, logit_blocks
 from .variables import COUNT_LAWS, mean_variables, sample_variables
 
@@ -79,22 +85,34 @@ class EffectiveLoss:
     a missing one counts as 0. ell is truncated where the Poisson tail falls
     below `ell_tol` (the kept probabilities are renormalised). For method="mc"
     the cached variables take about (number of clusters) x num_samples x V
-    numbers: thin out `mus` for long sequences. method="mean" with variances
-    averages them over `noise_samples` draws per cluster (16 already give the
-    loss to 1e-7 and its gradient to 0.3%); each call then costs about as much
-    as method="mc" with that many samples.
+    numbers: thin out `mus` for long sequences. method="mean" with variances takes
+    the moments given ell in closed form (`noise_samples` is no longer used and is
+    kept for compatibility).
+
+    keep: prunes the terms of the logit moments (term names, a predicate on
+    `terms.Term` or a preset of `terms.PRESETS`); None keeps all. spread (method="mean"):
+    "always" (default since 2026-10-08) uses the closure with the spread of the means
+    Cov(hbar | ell) also without variances (the signal-only loss is then not CE at the
+    mean logits); True includes the spread only when the closure is used anyway (with
+    variances), so that without variances the loss is CE at the mean logits; False is
+    the closure with the mean noise only, or CE at the mean logits without variances. Lambda: "mu" or "n-2ell", the rate of
+    the ell-level moments of method="mean" (the means too, if not "mu").
     """
 
     def __init__(self, V: int, L: int, K: int, beta: float, method: str = "mean", mus=None,
                  num_samples: int = 256, counts: str = "multinomial", ell_tol: float = 1e-6,
-                 seed: int = 0, dtype=torch.float64, device=None, noise_samples: int = 32):
+                 seed: int = 0, dtype=torch.float64, device=None, noise_samples: int = 32, keep=None,
+                 spread: bool | str = "always", Lambda: str = "mu"):
         if method not in METHODS:
             raise ValueError(f"method must be one of {METHODS}, got {method!r}")
+        if spread not in (True, False, "always"):
+            raise ValueError(f"spread must be True, False or 'always', got {spread!r}")
         if counts not in COUNT_LAWS:
             raise ValueError(f"counts must be one of {COUNT_LAWS}, got {counts!r}")
         self.V, self.L, self.K, self.beta, self.method = V, L, K, beta, method
         self.dtype, self.device = dtype, device
         self.num_samples, self.noise_samples, self.counts, self.seed = num_samples, noise_samples, counts, seed
+        self.keep, self.spread, self.Lambda = keep, spread, Lambda
         self.trigger_probability = K / (V + K)
         mus = torch.arange(1, L + 1) if mus is None else torch.as_tensor(list(mus)).reshape(-1)
         if (mus < 1).any() or (mus > L).any():
@@ -114,7 +132,6 @@ class EffectiveLoss:
         self.clusters = QueryTable({"mu": torch.cat(cluster_mu), "ell": torch.cat(cluster_ell),
                                     "probability": torch.cat(probability).to(dtype)})
 
-        self._samples = None
         if method == "mean":
             self.variables = mean_variables(self.clusters["mu"], self.clusters["ell"], V, K,
                                             dtype=dtype, device=device)
@@ -141,27 +158,43 @@ class EffectiveLoss:
 
     def cluster_cross_entropy(self, order_params: dict) -> torch.Tensor:
         """(number of clusters,) CE(mu, ell), in the order of `self.clusters`."""
-        if not _has_noise(order_params):
-            logits = ansatz_logits(self.variables, order_params, self.beta, self.L)
-        elif self.method == "mc":
-            logits = sample_logits(self.variables, order_params, self.beta, self.L, normals=self.normals)
-        else:
+        if self.method == "mean" and (_has_noise(order_params) or self.spread == "always"):
             return self._closure_cross_entropy(order_params)
+        if self.method == "mc":
+            logits = (sample_logits(self.variables, order_params, self.beta, self.L, normals=self.normals, keep=self.keep)
+                      if _has_noise(order_params) or self.keep is not None
+                      else ansatz_logits(self.variables, order_params, self.beta, self.L))
+        else:
+            logits = (self._ell_terms(order_params, means_only=True)[1] if self._custom_means()
+                      else ansatz_logits(self.variables, order_params, self.beta, self.L))
         table = QueryTable({"logits": logits, "mu": self.variables["mu"], "ell": self.variables["ell"]})
         return cluster_cross_entropy(table)["cross_entropy"]
 
+    def _custom_means(self) -> bool:
+        """Whether the mean logits differ from ansatz_logits of the cached variables."""
+        return self.keep is not None or (self.method == "mean" and self.Lambda != "mu")
+
+    def _ell_terms(self, order_params: dict, means_only: bool = False):
+        """The term layer given ell at the clusters (one output and one plain token): the
+        five closure moments with the kept terms (no spread if spread=False) and the mean logits."""
+        pairs = ("on", "T", "b") if means_only else ("on", "T", "b", *CLOSURE_PAIRS)
+        table = trigger_terms_ell(self.clusters["mu"], self.clusters["ell"], order_params, self.beta, self.L, self.V,
+                                  self.K, Lambda=self.Lambda, dtype=self.dtype, device=self.variables["N"].device,
+                                  pairs=pairs, classes_only=True)
+        kept = {name for name in table.resolve(self.keep) if self.spread or table[name].channel != "spread"}
+        logits = (mean_logits(table, kept) if self._custom_means()
+                  else ansatz_logits(self.variables, order_params, self.beta, self.L))
+        if means_only:
+            return None, logits
+        variances = closure_variances(table, kept)
+        variances["non_target"] = expand_classes(variances["non_target"], self.K, self.V)
+        return variances, logits
+
     def _closure_cross_entropy(self, order_params: dict) -> torch.Tensor:
-        """method="mean" with variances: the closure at the mean logits, with the noise
-        variances averaged over the sampled variables of each cluster."""
-        if self._samples is None:
-            generator = torch.Generator(self.device or "cpu").manual_seed(self.seed)
-            self._samples = self._sample(self.noise_samples, generator)
-        variances = noise_variances(self._samples, order_params, self.beta, self.L)
-        num_clusters = self.clusters.num_rows
-        variances = {name: value.reshape(num_clusters, self.noise_samples, *value.shape[1:]).mean(1)
-                     for name, value in variances.items()}
-        return closure_cross_entropy(ansatz_logits(self.variables, order_params, self.beta, self.L), variances,
-                                     self.K)
+        """method="mean" with variances: the closure at the mean logits, with the covariance
+        given ell (mean noise + spread of the means) of the term layer."""
+        variances, logits = self._ell_terms(order_params)
+        return closure_cross_entropy(logits, variances, self.K)
 
     def non_trigger_loss(self, order_params: dict):
         """The cross-entropy at the non-trigger queries, averaged over `mus`: log V
@@ -169,7 +202,7 @@ class EffectiveLoss:
         if not _has_noise(order_params):
             return math.log(self.V)
         return non_trigger_loss(self.mus, order_params, self.beta, self.L, self.V, self.K, dtype=self.dtype,
-                                device=self.variables["N"].device).mean()
+                                device=self.variables["N"].device, keep=self.keep).mean()
 
     def __call__(self, order_params: dict) -> torch.Tensor:
         trigger_loss = (self.clusters["probability"].to(self.variables["N"].device)

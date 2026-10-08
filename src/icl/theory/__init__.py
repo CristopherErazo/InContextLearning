@@ -9,6 +9,8 @@
   logits, the non-trigger loss).
 - `effective`: the effective population loss, differentiable in the order parameters,
   and its gradient flow (`integrate`).
+- `terms`: the logit moments of the appendix as named, prunable terms at every level
+  of conditioning (exact given the sequence, given S_mu, given ell / mu).
 
 Only `ansatz`, `variables` and `noise` know the ansatz; see `ansatz` for how to extend it.
 """
@@ -17,8 +19,13 @@ from .query_table import (QueryTable, canonical_permutation, check_condition, cl
 from .ansatz import (DIAGNOSTIC_MEANS, LEVELS, ORDER_PARAMS, POOLED_VARIANCES, PROFILE, SIGNAL, VARIANCES, ansatz_logits,
                      ansatz_matrices, at_level, block_variance, measure_diagnostic_means, measure_order_params,
                      measure_variances, support_sizes, variance_sizes)
-from .variables import COUNT_LAWS, mean_variables, measure_variables, sample_variables
+from .variables import (COUNT_LAWS, mean_variables, measure_nontrigger_variables, measure_variables,
+                        nontrigger_blocks, nontrigger_permutation, nontrigger_queries, sample_nontrigger_variables,
+                        sample_variables)
 from .noise import noise_variances, non_trigger_loss, sample_logits
+from . import terms
+from .terms import (TermTable, exact_nontrigger_terms, exact_trigger_terms, nontrigger_terms, nontrigger_terms_mu,
+                    trigger_terms, trigger_terms_ell)
 from .effective import (EffectiveLoss, asymptotic_loss, closure_cross_entropy, exact_rates, integrate, learning_time,
                         trigger_loss)
 
@@ -28,8 +35,11 @@ __all__ = [
     "ORDER_PARAMS", "PROFILE", "ansatz_logits", "ansatz_matrices", "measure_order_params", "support_sizes",
     "DIAGNOSTIC_MEANS", "VARIANCES", "POOLED_VARIANCES", "SIGNAL", "LEVELS", "at_level", "block_variance",
     "measure_diagnostic_means", "measure_variances", "variance_sizes",
-    "COUNT_LAWS", "mean_variables", "measure_variables", "sample_variables",
+    "COUNT_LAWS", "mean_variables", "measure_variables", "sample_variables", "measure_nontrigger_variables",
+    "sample_nontrigger_variables", "nontrigger_blocks", "nontrigger_permutation", "nontrigger_queries",
     "noise_variances", "non_trigger_loss", "sample_logits",
     "EffectiveLoss", "asymptotic_loss", "closure_cross_entropy", "exact_rates", "integrate", "learning_time",
     "trigger_loss",
+    "terms", "TermTable", "trigger_terms", "trigger_terms_ell", "nontrigger_terms", "nontrigger_terms_mu",
+    "exact_trigger_terms", "exact_nontrigger_terms",
 ]

@@ -20,7 +20,17 @@ paper's names:
 are, for a previous-token *profile* ("M_profile" in the order parameters):
 "N_keys" (n, max ell) the witness keys, "F_keys" (n, max f) the free target
 keys and "U_keys" (n, V-K-1, max count) the keys of each non-target token, as
-code positions of keys (1..mu-2), padded with 0.
+code positions of keys (1..mu-2), padded with 0. "U_triggered" (bool, the shape
+of "U_keys") says which of these keys follow a trigger, i.e. are the triggered
+occurrences of an output (their previous-token source is that trigger): the
+predecessor type the logit noise needs (`icl.theory.terms`). `measure_variables`
+always returns it, `sample_variables` with `triggered=True`.
+
+At a non-trigger query (`measure_nontrigger_variables`, `sample_nontrigger_variables`)
+the table has one row per non-trigger query and the per-token columns "U_bar",
+"W_bar", "U_keys", "U_triggered" over the V-K non-triggers, in the order of the
+`non_trigger` block of `nontrigger_blocks(K, V)`: the K outputs by trigger, then
+the other tokens by id.
 
 Three sources, all returning a `QueryTable` with "mu", "ell", these columns and
 the metadata "K", ready for `ansatz_logits`:
@@ -44,7 +54,7 @@ import torch.nn.functional as F
 from ..data import occurrence_counts
 from .query_table import QueryTable, canonical_permutation, logit_blocks, trigger_queries
 
-KEY_COLUMNS = ("N_keys", "F_keys", "U_keys")
+KEY_COLUMNS = ("N_keys", "F_keys", "U_keys", "U_triggered")
 
 
 def _packed(keys: torch.Tensor) -> torch.Tensor:
@@ -118,9 +128,11 @@ def measure_variables(batch: dict, mus=None, chunk: int = 8192, dtype=torch.floa
         width = int(rank[rows, columns].max().item()) + 1 if len(rows) else 1
         U_keys = torch.zeros(len(sequence_index), V - K - 1, width, dtype=torch.long, device=inputs.device)
         U_keys[rows, slot_of_key[rows, columns] - K, rank[rows, columns]] = columns
+        U_triggered = torch.zeros_like(U_keys, dtype=torch.bool)
+        U_triggered[rows, slot_of_key[rows, columns] - K, rank[rows, columns]] = follows_trigger[rows, columns]
         keys = {"N_keys": _packed(torch.where(is_earlier_query, code_position + 1, 0)),
                 "F_keys": _packed(torch.where(is_free_target, code_position, 0)),
-                "U_keys": U_keys}
+                "U_keys": U_keys, "U_triggered": U_triggered}
         per_token = {}
         for name, weight in weight_per_key.items():                     # sum of the weight over each token's keys
             totals = torch.zeros(len(sequence_index), V, dtype=dtype, device=inputs.device)
@@ -199,7 +211,7 @@ def _multinomial_counts(mu, ell, K, V, generator, dtype):
 
 def sample_variables(mu, ell, V: int, K: int, num_samples: int | None = None, counts: str = "poisson",
                      generator: torch.Generator | None = None, dtype=torch.float64, device=None,
-                     chunk: int = 4096) -> QueryTable:
+                     chunk: int = 4096, triggered: bool = False) -> QueryTable:
     """The variables drawn from their law at fixed (mu, ell), following the
     sampling protocol of the scratch file:
 
@@ -216,6 +228,11 @@ def sample_variables(mu, ell, V: int, K: int, num_samples: int | None = None, co
     Rows are drawn `chunk` at a time; pass a `torch.Generator` for reproducibility.
     The key columns place every occurrence at a uniform key of the query, the
     witness keys at the same relative positions x_k as R, W and P.
+    triggered: also draw "U_triggered", each occurrence of an output of another
+    trigger following its trigger with probability 1/2 (so the triggered and the
+    other occurrences are independent Poisson processes of rate p_T mu each). The
+    flags are drawn after everything else, so the other columns are the same as
+    without them.
     """
     if counts not in COUNT_LAWS:
         raise ValueError(f"counts must be one of {COUNT_LAWS}, got {counts!r}")
@@ -223,7 +240,18 @@ def sample_variables(mu, ell, V: int, K: int, num_samples: int | None = None, co
     parts = []
     for start in range(0, len(mu), chunk):
         parts.append(_sample_chunk(mu[start:start + chunk], ell[start:start + chunk], V, K, counts, generator, dtype))
-    return _concatenate_padded(parts)
+    table = _concatenate_padded(parts)
+    if triggered:
+        table["U_triggered"] = _draw_triggered(table["U_keys"], K - 1, generator)
+    return table
+
+
+def _draw_triggered(keys: torch.Tensor, num_outputs: int, generator) -> torch.Tensor:
+    """For key columns (n, tokens, slots): each real key of the first `num_outputs`
+    tokens (the outputs) follows its trigger with probability 1/2."""
+    coin = torch.rand(keys.shape, generator=generator, device=keys.device) < 0.5
+    is_output = (torch.arange(keys.size(1), device=keys.device) < num_outputs)[:, None]
+    return coin & is_output & (keys > 0)
 
 
 def _to_keys(positions: torch.Tensor, is_real: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
@@ -296,3 +324,98 @@ def mean_variables(mu, ell, V: int, K: int, dtype=torch.float64, device=None) ->
         "Y_bar": (rates / 2) ** 2 * (torch.arange(V - K - 1, device=mu.device) < K - 1),
         "K": K,
     })
+
+
+# ---- non-trigger queries ------------------------------------------------------------------
+
+def nontrigger_blocks(K: int, V: int) -> dict[str, slice]:
+    """Column slices of a logit vector at a non-trigger query: "triggers" [0, K), the
+    "non_trigger" tokens [K, V), made of "outputs" [K, 2K) (the outputs, by trigger) and
+    "rest" [2K, V) (the other non-triggers, by id). The query token is one of them."""
+    return {"triggers": slice(0, K), "non_trigger": slice(K, V), "outputs": slice(K, 2 * K), "rest": slice(2 * K, V)}
+
+
+def nontrigger_permutation(output_sets: torch.Tensor, K: int, V: int) -> torch.Tensor:
+    """(num_rows, V): entry [row, slot] is the token at `slot` of the layout of
+    `nontrigger_blocks`."""
+    num_rows, device = output_sets.size(0), output_sets.device
+    sort_key = (2 * V + torch.arange(V, device=device)).repeat(num_rows, 1)
+    sort_key[:, :K] = torch.arange(K, device=device)
+    sort_key.scatter_(1, output_sets, (V + torch.arange(K, device=device)).repeat(num_rows, 1))
+    return sort_key.argsort(dim=1)
+
+
+def nontrigger_queries(inputs: torch.Tensor, K: int, mus=None) -> tuple[torch.Tensor, torch.Tensor]:
+    """(sequence index, code position) of every non-trigger query of `inputs` (B, L) at
+    the given mu (int, list, or None = every mu), in row-major order."""
+    is_query = inputs >= K
+    if mus is not None:
+        position_wanted = torch.zeros(inputs.size(1), dtype=torch.bool, device=inputs.device)
+        positions = torch.as_tensor(mus, device=inputs.device).reshape(-1) - 1
+        position_wanted[positions[(positions >= 0) & (positions < inputs.size(1))]] = True
+        is_query &= position_wanted
+    return torch.where(is_query)
+
+
+def measure_nontrigger_variables(batch: dict, mus=None, chunk: int = 8192, dtype=torch.float64) -> QueryTable:
+    """The per-token variables at every non-trigger query of `batch` at the chosen mu,
+    measured exactly: "mu", "ell" (earlier occurrences of the query token), "sequence_index",
+    and over the V-K non-triggers (order of `nontrigger_blocks`) "U_bar" (occurrences among
+    the keys), "W_bar" (sum of nu - 2 over them), "U_keys" (their code positions, padded
+    with 0) and "U_triggered" (which of them follow a trigger). Metadata "K", "V"."""
+    K, V = int(batch["K"]), int(batch["V"])
+    inputs = batch["sequence"][:, :-1]
+    L = inputs.size(1)
+    all_sequence_index, all_position = nontrigger_queries(inputs, K, mus)
+    if len(all_sequence_index) == 0:
+        raise ValueError(f"no non-trigger query at mu = {mus}")
+    code_position = torch.arange(L, device=inputs.device)[None, :]
+    parts = []
+    for start in range(0, len(all_sequence_index), chunk):
+        sequence_index = all_sequence_index[start:start + chunk]
+        position = all_position[start:start + chunk][:, None]
+        tokens = inputs[sequence_index]
+        query_token = tokens.gather(1, position).squeeze(1)
+        is_key = (code_position >= 1) & (code_position < position)
+        follows_trigger = torch.zeros_like(is_key)
+        follows_trigger[:, 1:] = tokens[:, :-1] < K
+        permutation = nontrigger_permutation(batch["output_set"][sequence_index], K, V)
+        slot = torch.empty_like(permutation).scatter_(1, permutation, torch.arange(V, device=inputs.device).expand_as(permutation))
+        slot_of_key = slot.gather(1, tokens)
+        is_token_key = is_key & (slot_of_key >= K)
+        rank = occurrence_counts(torch.where(is_token_key, tokens, V)) - 1
+        rows, columns = torch.where(is_token_key)
+        width = int(rank[rows, columns].max().item()) + 1 if len(rows) else 1
+        U_keys = torch.zeros(len(sequence_index), V - K, width, dtype=torch.long, device=inputs.device)
+        U_keys[rows, slot_of_key[rows, columns] - K, rank[rows, columns]] = columns
+        U_triggered = torch.zeros_like(U_keys, dtype=torch.bool)
+        U_triggered[rows, slot_of_key[rows, columns] - K, rank[rows, columns]] = follows_trigger[rows, columns]
+        totals = {}
+        for name, weight in (("U", is_key.to(dtype)), ("W", is_key * (code_position - 1).to(dtype))):
+            per_token = torch.zeros(len(sequence_index), V, dtype=dtype, device=inputs.device)
+            totals[name] = per_token.scatter_add_(1, tokens, weight).gather(1, permutation)[:, K:]
+        earlier = ((tokens == query_token[:, None]) & (code_position < position)).sum(1)
+        parts.append(QueryTable({"mu": position.squeeze(1) + 1, "ell": earlier, "sequence_index": sequence_index,
+                                 "U_bar": totals["U"], "W_bar": totals["W"], "U_keys": U_keys,
+                                 "U_triggered": U_triggered, "K": K, "V": V}))
+    return _concatenate_padded(parts)
+
+
+def sample_nontrigger_variables(mu, V: int, K: int, num_samples: int | None = None,
+                                generator: torch.Generator | None = None, dtype=torch.float64,
+                                device=None) -> QueryTable:
+    """The per-token variables of `measure_nontrigger_variables` drawn from their law at
+    a non-trigger query at mu (int or 1-D tensor, broadcast to `num_samples` rows), under
+    A1-A3: each output occurs c ~ Poisson(2 p_T mu) times, each other non-trigger
+    c ~ Poisson(p_T mu), at i.i.d. uniform positions; an occurrence of an output follows
+    its trigger with probability 1/2."""
+    mu, _ = _as_rows(mu, 0, num_samples, device)
+    mu_float = mu.to(dtype)
+    m = mu_float / (V + K)
+    rates = torch.cat([2 * m[:, None].expand(-1, K), m[:, None].expand(-1, V - 2 * K)], dim=1)
+    occurrences = torch.poisson(rates, generator=generator)
+    positions, is_real = _uniform_positions(occurrences.long(), generator, dtype)
+    keys = _to_keys(positions, is_real, mu)
+    return QueryTable({"mu": mu, "ell": torch.zeros_like(mu), "U_bar": occurrences,
+                       "W_bar": mu_float[:, None] * (positions * is_real).sum(-1), "U_keys": keys,
+                       "U_triggered": _draw_triggered(keys, K, generator), "K": K, "V": V})

@@ -39,7 +39,12 @@ MUS = range(8, L + 1, 8)
 
 @pytest.mark.parametrize("method", ["mean", "mc"])
 def test_without_variances_the_loss_is_the_signal_only_one(method):
-    loss = EffectiveLoss(V, L, K, BETA, method=method, mus=MUS, num_samples=32)
+    """Variances absent = the signal-only loss. Variances present but 0 = the same, except that
+    method="mean" with spread=True then applies the closure with the spread of the means
+    Cov(hbar | ell) (audit item c2): that equals the default spread="always" without
+    variances, and spread=False recovers CE at the mean logits."""
+    loss = EffectiveLoss(V, L, K, BETA, method=method, mus=MUS, num_samples=32,
+                         spread=False if method == "mean" else True)
     assert torch.equal(loss(at_level({**MEANS, **SPREAD}, "S3")), loss(MEANS))
     assert loss.breakdown(MEANS)["loss_non_trigg"] == math.log(V)
     # variances present but 0: the noise paths reduce to the same loss
@@ -50,6 +55,12 @@ def test_without_variances_the_loss_is_the_signal_only_one(method):
     for name in MEANS:
         assert gradient_zero[name] == pytest.approx(gradient[name], rel=1e-9, abs=1e-12), name
     assert set(gradient_zero) == {*MEANS, *zero} and all(math.isfinite(gradient_zero[name]) for name in zero)
+    if method == "mean":
+        with_spread = EffectiveLoss(V, L, K, BETA, mus=MUS, spread=True)
+        always = EffectiveLoss(V, L, K, BETA, mus=MUS)
+        assert with_spread({**MEANS, **zero}).item() == pytest.approx(always(MEANS).item(), rel=1e-12)
+        assert torch.equal(with_spread(MEANS), loss(MEANS))          # no variance keys: no closure, unchanged
+        assert always(MEANS).item() > loss(MEANS).item()             # the spread costs loss
 
 
 @pytest.mark.parametrize("method", ["mean", "mc"])
@@ -127,3 +138,54 @@ def test_non_trigger_loss_matches_the_model():
         measured.append((torch.logsumexp(logits, -1) - logits.mean(-1))[inputs >= K].mean() - math.log(V))
     effective = EffectiveLoss(V, L, K, BETA).non_trigger_loss(op) - math.log(V)
     assert effective.item() == pytest.approx(torch.stack(measured).mean().item(), rel=0.1)
+
+
+def test_keep_propagates():
+    """keep="no_noise" removes every noise term: no fluctuation, the non-trigger loss is log V,
+    and the loss is that without variances (method "mean": with the spread of the means, as
+    spread="always"; method "mc": the signal-only loss)."""
+    from icl import noise_variances, non_trigger_loss, sample_logits, sample_variables, ansatz_logits
+    op = {**MEANS, **SPREAD}
+    variables = sample_variables(L, 2, V, K, num_samples=16, generator=torch.Generator().manual_seed(7))
+    for value in noise_variances(variables, op, BETA, L, keep="no_noise").values():
+        assert torch.equal(value, torch.zeros_like(value))
+    torch.testing.assert_close(sample_logits(variables, op, BETA, L, keep="no_noise", generator=torch.Generator()),
+                               ansatz_logits(variables, op, BETA, L), rtol=1e-12, atol=1e-14)
+    assert non_trigger_loss(L, op, BETA, L, V, K, keep="no_noise").item() == pytest.approx(math.log(V), rel=1e-15)
+    mean = EffectiveLoss(V, L, K, BETA, mus=MUS, keep="no_noise")
+    assert mean(op).item() == pytest.approx(EffectiveLoss(V, L, K, BETA, mus=MUS, spread="always")(MEANS).item(),
+                                            rel=1e-12)
+    mc = EffectiveLoss(V, L, K, BETA, method="mc", mus=MUS, num_samples=32, keep="no_noise")
+    assert mc(op).item() == pytest.approx(EffectiveLoss(V, L, K, BETA, method="mc", mus=MUS, num_samples=32)(MEANS).item(),
+                                          rel=1e-12)
+    # a predicate: without the token-coherent noise the loss is lower, but above the signal-only one
+    quiet = EffectiveLoss(V, L, K, BETA, mus=MUS, keep=lambda term: term.mechanism != "token_coherent")
+    full = EffectiveLoss(V, L, K, BETA, mus=MUS)
+    assert full(op).item() > quiet(op).item() > full(MEANS).item()
+
+
+def test_covariances_of_noise_variances():
+    """covariances=True adds the pairs the closure does not use, equal to the term layer's."""
+    from icl import generate_icl_batch as batch_of, measure_variables, noise_variances, trigger_terms
+    op = {**MEANS, **SPREAD}
+    variables = measure_variables(batch_of(200, V, L, K, generator=torch.Generator().manual_seed(8)), [L])
+    out = noise_variances(variables, op, BETA, L, covariances=True)
+    table = trigger_terms(variables, op, BETA, L)
+    torch.testing.assert_close(out["target_non_target"], table.total("on,b"))
+    torch.testing.assert_close(out["non_target_trigger"], table.total("b,T"))
+    torch.testing.assert_close(out["non_target_pairs"].dense(), table.total("b,b'").dense())
+    assert set(noise_variances(variables, op, BETA, L)) == {"target", "trigger_common", "trigger_individual",
+                                                            "non_target", "target_trigger"}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="no GPU")
+@pytest.mark.parametrize("method", ["mean", "mc"])
+def test_noise_gpu_path(method):
+    op = {**MEANS, **SPREAD}
+    cpu = EffectiveLoss(V, L, K, BETA, method=method, mus=MUS, num_samples=16)
+    gpu = EffectiveLoss(V, L, K, BETA, method=method, mus=MUS, num_samples=16, device="cuda")
+    if method == "mc":          # the same samples
+        gpu.variables = type(cpu.variables)({name: (value.cuda() if torch.is_tensor(value) else value)
+                                             for name, value in cpu.variables.items()})
+        gpu.normals = cpu.normals.cuda()
+    assert gpu(op).item() == pytest.approx(cpu(op).item(), rel=1e-10)
