@@ -14,8 +14,8 @@ from golden_theory import CHANGES, FIXTURE, K, compute
 from icl import measure_order_params, measure_variances
 
 # pattern of golden names -> why it moved and by how much. Phase 3 of
-# paper/scratch/2026-10-08-1103_plan-pruned-effective-model.md (2026-10-08): noise.py and the closure on the term
-# layer, audit items a1, b1, b2, c1, c2 of paper/scratch/2026-10-08-1119_pruned-effective-model.tex. Sizes are the
+# archive/scratch/2026-10-08-1103_plan-pruned-effective-model.md (2026-10-08): noise.py and the closure on the term
+# layer, audit items a1, b1, b2, c1, c2 of archive/scratch/2026-10-08-1119_pruned-effective-model.tex. Sizes are the
 # largest change relative to the largest stored value of the array. Their new values are in CHANGES.
 EXPECTED_CHANGES: dict[str, str] = {
     "*/noise_variances*": "a1 + b1/b2: given S from the term layer (corrected token-coherent rule, no same-source "

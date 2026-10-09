@@ -1,6 +1,6 @@
 """The logit noise of the variance ansatz (icl.theory.noise): no variance means no
 noise; the formulas against the exact covariance given the sequence (eq. cov_exact
-of paper/scratch/2026-10-05-0036_variance-profile-ansatz-explicit.tex) on real
+of archive/scratch/2026-10-05-0036_variance-profile-ansatz-explicit.tex) on real
 sequences, at two points of the ansatz; that exact covariance against the model on
 noisy ansatz matrices; the initialisation floor; the draws of `sample_logits`."""
 from __future__ import annotations

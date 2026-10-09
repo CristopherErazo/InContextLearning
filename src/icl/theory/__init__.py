@@ -1,4 +1,4 @@
-"""The effective model of the logits (paper/scratch/extended_ansatz.tex).
+"""The effective model of the logits (archive/scratch/extended_ansatz.tex).
 
 - `query_table`: the `QueryTable` (one row per trigger query), the canonical
   logit layout, the model's logits as a table and their per-(mu, ell)

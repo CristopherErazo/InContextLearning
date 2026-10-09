@@ -1,7 +1,7 @@
 """The ansatz: which order parameters exist and how they make the logits.
 
 This file and `variables.py` are the only places that know the ansatz
-(paper/scratch/extended_ansatz.tex); `noise.py` adds the fluctuation of the
+(archive/scratch/extended_ansatz.tex); `noise.py` adds the fluctuation of the
 variance ansatz on top of the brackets of `ansatz_logits`. To add an order parameter:
 
 1. register it in ORDER_PARAMS: the matrix it lives on and its support;
@@ -16,13 +16,13 @@ Names follow the paper: M_on, Q_T, ... are the order parameters, and N, F, R,
 W, P, U_bar, W_bar, P_bar the sequence variables of its Table 1.
 
 The previous-token diagonal can also be a *profile*
-(paper/scratch/2026-10-03-1539_profile-ansatz.tex): give
+(archive/scratch/2026-10-03-1539_profile-ansatz.tex): give
 `order_params["M_profile"]`, a tensor of length L-1 in the convention of
 `M.diagonal(-1)` (entry i is M[i+1, i], the key at code position i+1). It
 replaces M_on in the logits and in `ansatz_matrices`. M_on stays the scalar that
 is measured and logged (the mean of the profile).
 
-The variance ansatz (paper/scratch/2026-10-05-0036_variance-profile-ansatz-explicit.tex)
+The variance ansatz (archive/scratch/2026-10-05-0036_variance-profile-ansatz-explicit.tex)
 adds the spread of every block around its mean: VARIANCES holds the eight block
 variances ("var_M_on", ..., "var_G_N"), POOLED_VARIANCES the one-per-matrix ones
 ("var_M", "var_Q", "var_G") that stand in for any block of the matrix without its own

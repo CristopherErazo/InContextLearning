@@ -1,4 +1,4 @@
-"""Phase 5 of paper/scratch/2026-10-08-1103_plan-pruned-effective-model.md: the power counting
+"""Phase 5 of archive/scratch/2026-10-08-1103_plan-pruned-effective-model.md: the power counting
 of the terms at a trigger query given ell.
 
 1. Orders. Every term of `trigger_terms_ell` is written (icl.theory.terms.symbolic) in units

@@ -1,6 +1,6 @@
 """Independent oracle for tests/test_terms.py: a port of the checks of the appendix
 (code/_scratch/appendix_check/: core.py, noise_formulas.py, s9_fixed_appendix.py,
-s9c_nontrigger_fixed.py, paper.py, validated in paper/scratch/2026-10-07-2153_ansatz-appendix-check.tex),
+s9c_nontrigger_fixed.py, paper.py, validated in archive/scratch/2026-10-07-2153_ansatz-appendix-check.tex),
 written as literal transcriptions of the appendix formulas, independent of icl.theory.
 
 Adaptations: the profile is a tensor `m` (the mean previous-token entries, entry i <-> key

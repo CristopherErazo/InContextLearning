@@ -158,7 +158,7 @@ def frac_solvable_positions(rho: float, lam:float) -> float:
 
 
 def predicted_learning_time(cfg) -> float:
-    """Theory estimate of T* in gradient steps (paper/scratch/bimodal_derivation.tex).
+    """Theory estimate of T* in gradient steps (archive/scratch/bimodal_derivation.tex).
 
     T* = C * V^2 sqrt(L) / eta_0,   C = 2(1+rho)^2 sqrt(rho(1-rho)) / (beta rho)
     with eta_0 = lr * d_model, since one SGD step advances gradient-flow time by 1.

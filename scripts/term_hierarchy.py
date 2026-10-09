@@ -1,4 +1,4 @@
-"""Phase 4 of paper/scratch/2026-10-08-1103_plan-pruned-effective-model.md: the empirical
+"""Phase 4 of archive/scratch/2026-10-08-1103_plan-pruned-effective-model.md: the empirical
 hierarchy of the terms of the logit moments at full_ansatz/run_001.
 
     python -m scripts.term_hierarchy [--steps 1138 1345 1448 1552 3000] [--device cuda]

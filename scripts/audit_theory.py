@@ -1,4 +1,4 @@
-"""Phase 2 of paper/scratch/2026-10-08-1103_plan-pruned-effective-model.md: audit the public
+"""Phase 2 of archive/scratch/2026-10-08-1103_plan-pruned-effective-model.md: audit the public
 functions of icl.theory against the term layer (icl.theory.terms) and the exact covariance.
 
     python -m scripts.audit_theory --part noise   [--device cuda] [--sequences 20000]

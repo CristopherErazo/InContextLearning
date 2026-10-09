@@ -1,5 +1,5 @@
 """The sequence variables the ansatz logits depend on (Table 1 of
-paper/scratch/extended_ansatz.tex), at a trigger query tau_mu = a, with the
+archive/scratch/extended_ansatz.tex), at a trigger query tau_mu = a, with the
 paper's names:
 
     N      earlier occurrences of a                          sum_{nu<mu} d(tau_nu, a)

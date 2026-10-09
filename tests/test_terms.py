@@ -227,7 +227,7 @@ def test_same_source_pairs_are_not_token_coherent():
     the keys with a non-trigger predecessor in T(I, I), kappa_2 G1 in C_d, kappa_2 J2 in C_all.
     Exactly that difference; given ell the NN self-term is kappa_NN (E g^N)^2; and the
     token-coherent parts agree with the exact ones within MC error (as written they are off by
-    up to +185%, paper/scratch/2026-10-08-1119_pruned-effective-model.tex, section Audit)."""
+    up to +185%, archive/scratch/2026-10-08-1119_pruned-effective-model.tex, section Audit)."""
     from icl.theory.ansatz import _take
     from icl.theory.noise import _diagonal
     from icl.theory.terms import coincidence_rates

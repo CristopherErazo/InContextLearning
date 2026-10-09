@@ -3,7 +3,7 @@ logits (`ansatz_logits`) and xi the noise of the block fluctuations, with zero m
 the sequence. Since 2026-10-08 every moment comes from the term layer `icl.theory.terms`
 (the appendix's eqs. pairs_trigger, pairs_nontrigger_mean, with the corrected
 token-coherent rule and without the same-source pairs, audit items a1, b1, b2, c1 of
-paper/scratch/2026-10-08-1119_pruned-effective-model.tex):
+archive/scratch/2026-10-08-1119_pruned-effective-model.tex):
 
     noise_variances(variables, order_params, beta, L)         # per trigger query, given S_mu
     sample_logits(variables, order_params, beta, L, generator) # h_bar + a Gaussian xi
