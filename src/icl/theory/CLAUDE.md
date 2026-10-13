@@ -3,9 +3,9 @@
 The ansatz for the trained matrices, the logit moments it implies, the effective population
 loss and its gradient flow. The equations are in `paper/appendix/appendix.tex` (sections
 Ansatz and Effective Loss); the original derivations are in the project root's
-`archive/scratch/` (`extended_ansatz.tex`, `2026-10-03-1539_profile-ansatz.tex`,
+`meta/archive/scratch/` (`extended_ansatz.tex`, `2026-10-03-1539_profile-ansatz.tex`,
 `2026-10-05-0036_variance-profile-ansatz-explicit.tex`) and the term layer's design and audit
-in `archive/scratch/2026-10-08-1907_pruned-effective-model.tex`. Module docstrings hold the
+in `meta/archive/scratch/2026-10-08-1907_pruned-effective-model.tex`. Module docstrings hold the
 signatures; below are the conventions, the map and the contracts.
 
 ## Conventions (every function)

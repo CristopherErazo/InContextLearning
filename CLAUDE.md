@@ -10,7 +10,7 @@ author, exploratory. It depends on two libraries by the same author, TrackLab (e
 tracker) and Rewind (controllable training loop + Shiny dashboard), pinned to GitHub in
 `pyproject.toml`; both have their own `CLAUDE.md` — read them when touching tracker /
 controller / dashboard behaviour. Setup is in `README.md`. Project status and decisions
-live in the project root's `journal/`, the experiment log in `journal/RUNS.md`.
+live in the project root's `meta/journal/`, the experiment log in `meta/journal/RUNS.md`.
 
 ## Commands
 
@@ -147,7 +147,7 @@ TrackLab only, no Rewind; the only script that runs `backend=reduced`. When chan
 run evaluates or saves, change both scripts. `extra_args.eval_chunk` (default: the training
 batch size) goes to the `Evaluator`; `extra_args.stop_at_loss` / `stop_at_accuracy` stop
 early. Other scripts in `scripts/` and `shell/` are one-off experiments, logged in the
-project root's `journal/RUNS.md`.
+project root's `meta/journal/RUNS.md`.
 
 ## Branches and notebooks
 
